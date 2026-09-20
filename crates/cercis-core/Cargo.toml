@@ -1,0 +1,19 @@
+[package]
+name = "cercis-core"
+description = "Cercis 内核：跨平台、行业普适的“文件夹即数据库”引擎（数据存取 + AI 友好）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+csv = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+ulid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+unicode-normalization = { workspace = true }

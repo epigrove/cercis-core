@@ -1,0 +1,16 @@
+[package]
+name = "cercis-cli"
+description = "Cercis 命令行入口（cercis）：内核能力的第一个使用者，供人、脚本与 AI 调用"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "cercis"
+path = "src/main.rs"
+
+[dependencies]
+cercis-core = { path = "../cercis-core", version = "0.1.0" }
+clap = { workspace = true }
+serde_json = { workspace = true }

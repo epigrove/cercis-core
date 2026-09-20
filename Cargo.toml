@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/cercis-core", "crates/cercis-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.75"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+csv = "1"
+sha2 = "0.10"
+hex = "0.4"
+ulid = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+thiserror = "2"
+unicode-normalization = "0.1"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
