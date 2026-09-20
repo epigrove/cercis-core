@@ -81,7 +81,7 @@ pub fn validate_project(store: &Store, template: &Template) -> Result<Report> {
         let path = store.root().join("tables").join(format!("{}.csv", t.name));
         if path.exists() {
             let table = Table::load(&path)?;
-            report.into_template_columns(t, &table);
+            report.check_template_columns(t, &table);
             tables.insert(t.name.clone(), table);
         } else {
             report.push_warning(&t.name, 0, "", "模板声明的表尚不存在（未使用）".into());
@@ -100,7 +100,7 @@ pub fn validate_project(store: &Store, template: &Template) -> Result<Report> {
 
 impl Report {
     /// 表列与模板列的一致性检查（结构层）。
-    fn into_template_columns(&mut self, t: &crate::template::TableDef, table: &Table) {
+    fn check_template_columns(&mut self, t: &crate::template::TableDef, table: &Table) {
         for col in &table.columns {
             if t.fields.iter().all(|f| f.name != *col) {
                 self.push_warning(
@@ -277,15 +277,13 @@ fn validate_cell(
                 );
             }
         }
-        "bool" => {
-            if !matches!(cell.trim(), "是" | "否" | "true" | "false") {
-                report.push_warning(
-                    &t.name,
-                    lineno,
-                    &f.name,
-                    format!("布尔值建议使用 是/否: {cell:?}"),
-                );
-            }
+        "bool" if !matches!(cell.trim(), "是" | "否" | "true" | "false") => {
+            report.push_warning(
+                &t.name,
+                lineno,
+                &f.name,
+                format!("布尔值建议使用 是/否: {cell:?}"),
+            );
         }
         _ => {}
     }

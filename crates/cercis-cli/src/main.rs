@@ -55,6 +55,14 @@ enum Command {
     Query(QueryArgs),
     /// 校验项目（引用完整性 + 字段规则）
     Validate(ProjectArg),
+    /// 刷新机器清单与 AI 材料（AGENTS.md / CLAUDE.md / ai_contract.json）
+    Agents(ProjectArg),
+    /// 生成机器清单
+    ManifestCmd(ProjectArg),
+    /// 列出插件（全局与项目内；项目内默认未信任）
+    Plugins(PluginsArgs),
+    /// 信任项目内插件（绑定内容指纹）
+    Trust(TrustArgs),
     /// 内核信息
     Version,
 }
@@ -111,6 +119,25 @@ struct InitArgs {
 struct ProjectArg {
     /// 项目目录
     path: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct PluginsArgs {
+    path: PathBuf,
+    /// 全局插件目录（可选）
+    #[arg(long)]
+    global_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct TrustArgs {
+    path: PathBuf,
+    /// 插件 ID
+    #[arg(long)]
+    id: String,
+    /// 撤销信任（默认是授予信任）
+    #[arg(long)]
+    revoke: bool,
 }
 
 #[derive(Args, Debug)]
@@ -358,6 +385,111 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                         .join("  ");
                     println!("  {line}");
                 }
+            }
+        }
+
+        Command::Agents(a) => {
+            let m = cercis_core::ai::refresh_all(&a.path)?;
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "project": m.project_name,
+                    "tables": m.tables.len(),
+                }));
+            } else {
+                println!("已刷新 AI 材料：");
+                println!("  AGENTS.md（AI 说明书）");
+                println!("  CLAUDE.md（其他 AI 工具入口）");
+                println!("  _labnote/manifest.json（机器清单）");
+                println!("  _labnote/ai_contract.json（机器契约）");
+            }
+        }
+
+        Command::ManifestCmd(a) => {
+            let m = cercis_core::Manifest::generate(&a.path)?;
+            m.write(&a.path)?;
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "manifest": m,
+                }));
+            } else {
+                println!(
+                    "已生成清单：{} 张表，变更 {} 条",
+                    m.tables.len(),
+                    m.change_count
+                );
+                for t in &m.tables {
+                    println!("  {:<16} {:>6} 行  {} 列", t.name, t.rows, t.columns.len());
+                }
+            }
+        }
+
+        Command::Plugins(a) => {
+            let found = cercis_core::plugin::discover(&a.path, a.global_dir.as_deref())?;
+            let trust = cercis_core::TrustRecord::load(&a.path)?;
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "plugins": found.iter().map(|p| serde_json::json!({
+                        "id": p.manifest.id,
+                        "name": p.manifest.name,
+                        "tier": p.manifest.tier,
+                        "origin": p.origin,
+                        "fingerprint": p.fingerprint,
+                        "trusted": trust.is_trusted(&p.manifest.id, &p.fingerprint),
+                        "permissions": p.manifest.permission_summary(),
+                        "ui": p.manifest.ui.len(),
+                    })).collect::<Vec<_>>(),
+                }));
+            } else if found.is_empty() {
+                println!("未发现插件。");
+            } else {
+                for p in &found {
+                    let trusted = trust.is_trusted(&p.manifest.id, &p.fingerprint);
+                    let status = if p.origin == "project" {
+                        if trusted {
+                            "已信任"
+                        } else {
+                            "未信任（默认不加载）"
+                        }
+                    } else {
+                        "全局"
+                    };
+                    println!(
+                        "{}  {}  [{}]  {}  权限：{}  界面扩展：{}",
+                        p.manifest.id,
+                        p.manifest.name,
+                        p.origin,
+                        status,
+                        p.manifest.permission_summary(),
+                        p.manifest.ui.len()
+                    );
+                }
+            }
+        }
+
+        Command::Trust(a) => {
+            let found = cercis_core::plugin::discover(&a.path, None)?;
+            let target = found
+                .iter()
+                .find(|p| p.manifest.id == a.id)
+                .ok_or_else(|| CercisError::NotFound(format!("未找到插件：{}", a.id)))?;
+            let mut tr = cercis_core::TrustRecord::load(&a.path)?;
+            if a.revoke {
+                tr.untrust(&a.id);
+                tr.save(&a.path)?;
+                println!("已撤销信任：{}", a.id);
+            } else {
+                tr.trust(&a.id, &target.fingerprint);
+                tr.save(&a.path)?;
+                println!("已信任插件：{}", a.id);
+                println!("  权限：{}", target.manifest.permission_summary());
+                println!("  指纹：{}", target.fingerprint);
+                println!("（内容一旦变化，信任将自动失效）");
             }
         }
 
