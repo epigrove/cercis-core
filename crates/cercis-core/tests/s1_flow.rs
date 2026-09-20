@@ -30,12 +30,12 @@ fn s1_full_flow() {
     assert!(dir.join("project.yaml").exists());
     assert!(dir.join("tables").exists());
 
-    // 2. 写一行（合成数据）
-    let cols = ["record_id", "subject_id", "measure_id", "value_num"];
+    // 2. 写一行（合成数据；列来自项目模板 records 表）
+    let cols = ["record_id", "date", "label", "value_num"];
     let mut row = Row::new();
     row.insert("record_id".into(), "R-0001".into());
-    row.insert("subject_id".into(), "SUBJ-001".into());
-    row.insert("measure_id".into(), "length".into());
+    row.insert("date".into(), "2026-03-15".into());
+    row.insert("label".into(), "示例".into());
     row.insert("value_num".into(), "12.5".into());
     p.store
         .append_row("records", &cols, row, "R-0001", "录入合成数据")

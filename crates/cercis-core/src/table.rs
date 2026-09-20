@@ -36,6 +36,17 @@ impl ValidationReport {
 }
 
 impl Table {
+    /// 构造一张内存表（不绑定文件；用于测试与"先组装再落盘"的场景）。
+    ///
+    /// 注意：这种表调用 `save()` 会写入 `path` 指定的位置；若只做内存运算可忽略。
+    pub fn in_memory(path: impl AsRef<Path>, columns: &[&str]) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            columns: columns.iter().map(|s| s.to_string()).collect(),
+            rows: Vec::new(),
+        }
+    }
+
     /// 从 CSV 文件载入。
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
@@ -103,7 +114,7 @@ impl Table {
         }
         let mut seen = std::collections::BTreeSet::new();
         for c in &self.columns {
-            if !is_ascii_snake(c) {
+            if !format::is_ascii_snake(c) {
                 return Err(CercisError::Corrupt(format!(
                     "列名需为小写 ASCII 下划线形式（如 sample_id），实际: {c:?}（{}）",
                     self.path.display()
@@ -203,15 +214,6 @@ impl Table {
     pub fn path(&self) -> &Path {
         &self.path
     }
-}
-
-fn is_ascii_snake(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        && !s.starts_with('_')
-        && !s.ends_with('_')
-        && !s.contains("__")
 }
 
 fn csv_escape(s: &str) -> String {

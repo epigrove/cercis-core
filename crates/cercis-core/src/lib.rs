@@ -12,8 +12,12 @@
 //! - 编号与格式规则（`ids`、`format`）
 //! - 逐次存档与检查点（`history`：内容寻址对象库 + 文件级检查点）
 //!
+//! ## S2（本阶段）范围
+//! - 表结构定义机制（`template`：字段语义由模板提供，内核不含学科词）
+//! - 查询原语（`query`：组合筛选、排序、分页，确定性输出）
+//! - 引用完整性与字段校验（`validate`：结构错误阻止、业务规则警告）
+//!
 //! ## 尚未实现（后续阶段）
-//! - S2：完整的表结构定义与约束、查询原语（组合筛选/排序/分页）
 //! - S3：机器清单完善、插件注册协议、UI 扩展点协议
 //!
 //! ## 设计红线
@@ -27,9 +31,12 @@ pub mod format;
 pub mod history;
 pub mod ids;
 pub mod project;
+pub mod query;
 pub mod store;
 pub mod table;
+pub mod template;
 pub mod tx;
+pub mod validate;
 
 /// 内核版本（来自 Cargo.toml）。
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -39,5 +46,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub use config::ProjectConfig;
 pub use error::{CercisError, Result};
 pub use project::Project;
+pub use query::{Condition, Op, Query, SortDir, SortKey};
 pub use store::{Identity, Store};
 pub use table::Table;
+pub use template::Template;
+pub use validate::{validate_project, Issue, Report};

@@ -6,8 +6,11 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ProjectConfig;
 use crate::history::Checkpoints;
+use crate::query::Query;
 use crate::store::{Identity, Store};
+use crate::template::Template;
 use crate::tx;
+use crate::validate::{validate_project, Report};
 use crate::{CercisError, Result};
 
 /// 一个 Cercis 项目。
@@ -78,14 +81,18 @@ impl Project {
         tx::write_atomic_str(&root.join("access/README.md"), ACCESS_README)?;
         tx::write_atomic_str(&root.join("plugins/README.md"), PLUGINS_README)?;
 
+        // 装入通用模板（最小可用；用户可换成其他模板）
+        let template = Template::generic();
+        template.save(root.join("template.yaml"))?;
         let store = Store::new(&root, identity);
+        store.ensure_tables_from_template(&template)?;
         store.append_change(&crate::history::ChangeEntry::new(
             &store.identity.user_id,
             &store.identity.device_for_log(),
             "create",
             "project",
             &config.id,
-            &format!("创建项目：{name}"),
+            &format!("创建项目：{name}（已装入通用模板）"),
             "",
             "",
         ))?;
@@ -139,6 +146,57 @@ impl Project {
             issues.push(format!("清理残留临时文件: {}", r.display()));
         }
         Ok(issues)
+    }
+
+    /// 载入项目模板（缺省返回通用模板）。
+    pub fn template(&self) -> Result<Template> {
+        match self.store.load_template()? {
+            Some(t) => Ok(t),
+            None => Ok(Template::generic()),
+        }
+    }
+
+    /// 装入模板：保存到项目并建表（已有的表与数据不动）。
+    ///
+    /// 返回新建的表名列表。
+    pub fn install_template(&self, t: &Template) -> Result<Vec<String>> {
+        t.validate()?;
+        self.store.save_template(t)?;
+        let created = self.store.ensure_tables_from_template(t)?;
+        self.store.append_change(&crate::history::ChangeEntry::new(
+            &self.store.identity.user_id,
+            &self.store.identity.device_for_log(),
+            "update",
+            "template",
+            &t.name,
+            &format!("装入模板 {}（新建表: {}）", t.name, created.join(", ")),
+            "",
+            "",
+        ))?;
+        Ok(created)
+    }
+
+    /// 按模板执行查询。
+    pub fn query(&self, table: &str, mut q: Query) -> Result<Vec<crate::table::Row>> {
+        let t = self.template()?;
+        let table_obj = self.store.load_table_with_template(table, &t)?;
+        // 用模板里的类型信息补全查询（数值/日期排序需要）
+        if q.types.is_empty() {
+            if let Some(td) = t.table(table) {
+                let mut m = std::collections::BTreeMap::new();
+                for f in &td.fields {
+                    m.insert(f.name.clone(), f.field_type.clone());
+                }
+                q.types = m;
+            }
+        }
+        q.execute(&table_obj)
+    }
+
+    /// 按模板做整体校验（引用完整性 + 字段规则）。
+    pub fn validate(&self) -> Result<Report> {
+        let t = self.template()?;
+        validate_project(&self.store, &t)
     }
 
     /// 创建检查点（文件级备份）。

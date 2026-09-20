@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+use cercis_core::query::{Op, Query, SortDir};
 use cercis_core::store::Identity;
 use cercis_core::table::Row;
 use cercis_core::{CercisError, Project};
@@ -46,8 +47,49 @@ enum Command {
     Checkpoint(CheckpointArgs),
     /// 还原某个历史对象到文件（回滚 = 新变更）
     Restore(RestoreArgs),
+    /// 查看项目模板（表结构与字段定义）
+    Template(TemplateArgs),
+    /// 装入模板（示例研究 / 通用）
+    InstallTemplate(InstallTemplateArgs),
+    /// 按条件查询某张表（组合筛选 + 排序）
+    Query(QueryArgs),
+    /// 校验项目（引用完整性 + 字段规则）
+    Validate(ProjectArg),
     /// 内核信息
     Version,
+}
+
+#[derive(Args, Debug)]
+struct TemplateArgs {
+    path: PathBuf,
+    /// 只显示某张表
+    #[arg(long)]
+    table: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct InstallTemplateArgs {
+    path: PathBuf,
+    /// 模板名：generic / example-study
+    #[arg(long)]
+    name: String,
+}
+
+#[derive(Args, Debug)]
+struct QueryArgs {
+    path: PathBuf,
+    #[arg(long)]
+    table: String,
+    /// 筛选：col op value（如 --filter value_num ge 12）；可重复
+    #[arg(long = "filter", value_name = "COL OP VAL", num_args = 3)]
+    filters: Vec<String>,
+    /// 排序：col 或 col:desc
+    #[arg(long = "sort")]
+    sort: Option<String>,
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
 }
 
 #[derive(Args, Debug)]
@@ -167,6 +209,176 @@ fn main() {
 
 fn run(cli: &Cli) -> Result<(), CercisError> {
     match &cli.command {
+        Command::Template(a) => {
+            let p = Project::open(&a.path, None)?;
+            let t = p.template()?;
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "template": t,
+                }));
+            } else {
+                println!("模板：{}（{}）", t.name, t.label_cn);
+                for td in &t.tables {
+                    if let Some(only) = &a.table {
+                        if only != &td.name {
+                            continue;
+                        }
+                    }
+                    println!(
+                        "\n表 {}（{}） 主键: {}",
+                        td.name, td.label_cn, td.primary_key
+                    );
+                    for f in &td.fields {
+                        let unit = if f.unit.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" 单位={}", f.unit)
+                        };
+                        let req = if f.required { " 必填" } else { "" };
+                        let rng = match &f.range {
+                            Some(r) if r.len() == 2 => format!(
+                                " 范围=[{}, {}]",
+                                r[0].map(|v| v.to_string()).unwrap_or_default(),
+                                r[1].map(|v| v.to_string()).unwrap_or_default()
+                            ),
+                            _ => String::new(),
+                        };
+                        let reff = f
+                            .reference
+                            .as_ref()
+                            .map(|r| format!(" 引用={r}"))
+                            .unwrap_or_default();
+                        println!(
+                            "  {:<20} {:<12} {}{}{}{}",
+                            f.name, f.label_cn, f.field_type, unit, req, rng
+                        );
+                        if !reff.is_empty() {
+                            println!("  {:<20} ↳{}", "", reff);
+                        }
+                    }
+                }
+            }
+        }
+
+        Command::InstallTemplate(a) => {
+            let p = Project::open(&a.path, None)?;
+            let t = match a.name.as_str() {
+                "generic" => cercis_core::Template::generic(),
+                "example-study" => cercis_core::Template::example_study(),
+                other => {
+                    return Err(CercisError::Invalid(format!(
+                        "未知模板 {other}（可用：generic / example-study）"
+                    )))
+                }
+            };
+            let created = p.install_template(&t)?;
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "template": t.name,
+                    "created_tables": created,
+                }));
+            } else {
+                println!("已装入模板：{}", t.name);
+                if created.is_empty() {
+                    println!("（表已存在，未新建）");
+                } else {
+                    println!("新建表：{}", created.join(", "));
+                }
+            }
+        }
+
+        Command::Query(a) => {
+            let p = Project::open(&a.path, None)?;
+            let mut q = Query::new();
+
+            // 解析 --filter col op value（三连）
+            if a.filters.len() % 3 != 0 {
+                return Err(CercisError::Invalid(
+                    "--filter 需要三个值：列名 运算符 值".into(),
+                ));
+            }
+            for trio in a.filters.chunks(3) {
+                let (col, op, val) = (&trio[0], &trio[1], &trio[2]);
+                let op = match op.as_str() {
+                    "eq" => Op::Eq,
+                    "ne" => Op::Ne,
+                    "lt" => Op::Lt,
+                    "le" => Op::Le,
+                    "gt" => Op::Gt,
+                    "ge" => Op::Ge,
+                    "contains" => Op::Contains,
+                    "startswith" => Op::StartsWith,
+                    "in" => Op::In,
+                    "isempty" => Op::IsEmpty,
+                    "notempty" => Op::NotEmpty,
+                    other => {
+                        return Err(CercisError::Invalid(format!(
+                            "未知运算符 {other}（可用: eq ne lt le gt ge contains startswith in isempty notempty）"
+                        )))
+                    }
+                };
+                q = q.filter(col, op, val);
+            }
+
+            if let Some(sort) = &a.sort {
+                let (col, dir) = match sort.split_once(':') {
+                    Some((c, "desc")) => (c, SortDir::Desc),
+                    Some((c, "asc")) => (c, SortDir::Asc),
+                    Some((_, other)) => {
+                        return Err(CercisError::Invalid(format!(
+                            "排序方向只能是 asc 或 desc，实际: {other}"
+                        )))
+                    }
+                    None => (sort.as_str(), SortDir::Asc),
+                };
+                q = q.sort(col, dir);
+            }
+            q = q.page(a.offset, a.limit);
+
+            let rows = p.query(&a.table, q)?;
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "table": a.table,
+                    "count": rows.len(),
+                    "rows": rows,
+                }));
+            } else {
+                println!("表 {}：命中 {} 行", a.table, rows.len());
+                for r in &rows {
+                    let line = r
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    println!("  {line}");
+                }
+            }
+        }
+
+        Command::Validate(a) => {
+            let p = Project::open(&a.path, None)?;
+            let report = p.validate()?;
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": report.is_ok(),
+                    "errors": report.errors,
+                    "warnings": report.warnings,
+                }));
+            } else {
+                print!("{}", cercis_core::validate::report_to_text(&report));
+            }
+            if !report.is_ok() {
+                std::process::exit(2);
+            }
+        }
+
         Command::Version => {
             if cli.json {
                 print_json(&serde_json::json!({

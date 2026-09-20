@@ -15,6 +15,18 @@ pub const MISSING_MARKERS: &[&str] = &[
     "NA", "N/A", "na", "null", "NULL", "NaN", "-", "--", "?", ".",
 ];
 
+/// 是否为合法的小写 ASCII 下划线标识（列名、表名用）。
+///
+/// 规则：非空；仅 `a-z 0-9 _`；不以 `_` 开头或结尾；不含连续 `__`。
+pub fn is_ascii_snake(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && !s.starts_with('_')
+        && !s.ends_with('_')
+        && !s.contains("__")
+}
+
 /// 是否为 ISO 8601 日期（YYYY-MM-DD）。
 pub fn is_iso_date(s: &str) -> bool {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
