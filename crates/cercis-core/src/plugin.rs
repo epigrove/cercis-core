@@ -81,7 +81,10 @@ pub struct UiExtension {
     #[serde(default)]
     pub placement: String,
     /// `command` 扩展点专用：调用插件入口时传的参数（如 `data import`）。
-    /// 留空时退回用 `id`（把点号换成空格），因此老插件不需要改。
+    ///
+    /// **留空表示入口不需要参数**（直接以 `<entrypoint> --project … --json` 调用）——
+    /// 有些插件入口本身没有子命令，硬套一个推断出来的参数只会让它失败。
+    /// 需要子命令的插件请显式写清楚。
     #[serde(default)]
     pub command: String,
 }
@@ -102,13 +105,9 @@ impl UiExtension {
         )
     }
 
-    /// 调用入口时实际使用的参数文本。
+    /// 调用入口时实际使用的参数文本（可能为空：入口不需要参数）。
     pub fn invocation(&self) -> String {
-        if !self.command.trim().is_empty() {
-            return self.command.trim().to_string();
-        }
-        // 约定：扩展点 id 用点分层级（`data.import`），退化成子命令（`data import`）
-        self.id.trim().replace('.', " ")
+        self.command.trim().to_string()
     }
 }
 
@@ -443,16 +442,22 @@ description: 导出 SPSS 语法与数据文件
     fn command_extension_carries_invocation() {
         let m = PluginManifest::from_yaml(SAMPLE).unwrap();
         let export = m.ui.iter().find(|u| u.kind == "menu").unwrap();
-        // 未写 command 时，用扩展点 id 退化（export.spss → "export spss"）
-        assert_eq!(export.invocation(), "export spss");
+        // 未写 command 时不留推断：入口不需要参数
+        assert_eq!(export.invocation(), "");
 
         let with_command = SAMPLE.replace(
             "  - kind: menu\n    id: export.spss",
-            "  - kind: command\n    id: data.import\n    command: data import\n    label_cn: 导入数据\n    label_en: Import data\n  - kind: menu\n    id: export.spss",
+            "  - kind: command\n    id: data.import\n    command: data import\n    label_cn: 导入数据\n    label_en: Import data\n  - kind: command\n    id: health.check\n    label_cn: 体检\n    label_en: Health check\n  - kind: menu\n    id: export.spss",
         );
         let m2 = PluginManifest::from_yaml(&with_command).unwrap();
         let import = m2.ui.iter().find(|u| u.id == "data.import").unwrap();
         assert_eq!(import.invocation(), "data import");
+        let health = m2.ui.iter().find(|u| u.id == "health.check").unwrap();
+        assert_eq!(
+            health.invocation(),
+            "",
+            "没有子命令的入口应保持空参数（不推断 id）"
+        );
     }
 
     #[test]
