@@ -4,7 +4,8 @@
 //! - 所有命令支持 `--json`（稳定输出，带 schema 版本）
 //! - 只读默认；写入命令明确列出，且全部经由内核通道留痕
 
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
@@ -39,6 +40,8 @@ enum Command {
     Show(ShowArgs),
     /// 追加一行（写入）
     Append(AppendArgs),
+    /// 批量追加多行（一次事务、一条流水；导入用）
+    AppendMany(AppendManyArgs),
     /// 记录一条更正（写入；不覆盖原值）
     Correct(CorrectArgs),
     /// 查看变更流水
@@ -165,6 +168,32 @@ struct AppendArgs {
     /// 单元格：允许重复，形如 --set col=value
     #[arg(long = "set", value_name = "COL=VALUE")]
     sets: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct AppendManyArgs {
+    /// 项目目录
+    path: PathBuf,
+    #[arg(long)]
+    table: String,
+    /// 数据来源：CSV/TSV 文件、JSON 数组文件、或 `-`（从标准输入读 JSON）
+    #[arg(long, value_name = "FILE|-")]
+    from: String,
+    /// 流水中记录的动作（create / import / …）
+    #[arg(long, default_value = "import")]
+    action: String,
+    /// 一句话说明（留空自动生成）
+    #[arg(long, default_value = "")]
+    summary: String,
+    /// 来源说明（导入文件路径等，便于追溯）
+    #[arg(long, default_value = "")]
+    source_ref: String,
+    /// 允许写入模板未定义的列（默认拒绝）
+    #[arg(long)]
+    allow_new_columns: bool,
+    /// 只校验不写入（试运行）
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -619,6 +648,107 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
             }
         }
 
+        Command::AppendMany(a) => {
+            let rows = read_rows_input(&a.from)?;
+            if rows.is_empty() {
+                return Err(CercisError::Invalid(format!("{} 中没有数据行", a.from)));
+            }
+
+            let p = Project::open(&a.path, None)?;
+            let template = p.template()?;
+            let template_cols: Vec<String> = template
+                .table(&a.table)
+                .map(|td| td.fields.iter().map(|f| f.name.clone()).collect())
+                .unwrap_or_default();
+
+            // 输入涉及的列：模板列在前，输入里新增的列在后（顺序稳定，便于复核）
+            let mut columns = template_cols.clone();
+            for r in &rows {
+                for k in r.keys() {
+                    if !columns.contains(k) {
+                        columns.push(k.clone());
+                    }
+                }
+            }
+
+            // 模板已定义该表时，默认拒绝写入模板之外的列（防止手滑多写一列脏数据）
+            if !template_cols.is_empty() && !a.allow_new_columns {
+                let extra: Vec<&str> = columns[template_cols.len()..]
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect();
+                if !extra.is_empty() {
+                    return Err(CercisError::Invalid(format!(
+                        "输入含有模板 {} 未定义的列：{}（请先扩展模板，或显式加 --allow-new-columns）",
+                        template.name,
+                        extra.join(", ")
+                    )));
+                }
+            }
+
+            let summary = if a.summary.is_empty() {
+                format!("导入 {} 行到表 {}（来源：{}）", rows.len(), a.table, a.from)
+            } else {
+                a.summary.clone()
+            };
+
+            if a.dry_run {
+                if cli.json {
+                    print_json(&serde_json::json!({
+                        "schema": "cercis.cli/1",
+                        "ok": true,
+                        "dry_run": true,
+                        "table": a.table,
+                        "rows": rows.len(),
+                        "columns": columns,
+                        "sample": rows.iter().take(3).collect::<Vec<_>>(),
+                    }));
+                } else {
+                    println!("试运行：表 {} 将新增 {} 行", a.table, rows.len());
+                    println!("列：{}", columns.join(", "));
+                    for r in rows.iter().take(3) {
+                        let line = r
+                            .iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect::<Vec<_>>()
+                            .join("  ");
+                        println!("  {line}");
+                    }
+                    println!("（未写入任何数据；去掉 --dry-run 即正式导入）");
+                }
+                return Ok(());
+            }
+
+            let refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
+            let outcome = p.store.append_rows(
+                &a.table,
+                &refs,
+                rows,
+                &a.action,
+                &summary,
+                &a.source_ref,
+            )?;
+
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "dry_run": false,
+                    "table": a.table,
+                    "rows_written": outcome.rows_written,
+                    "batch_id": outcome.batch_id,
+                    "hash_after": outcome.hash_after,
+                    "action": a.action,
+                    "source_ref": a.source_ref,
+                }));
+            } else {
+                println!(
+                    "已导入 {} 行到表 {}（一次事务、一条流水；批次 {}）",
+                    outcome.rows_written, a.table, outcome.batch_id
+                );
+            }
+        }
+
         Command::Correct(a) => {
             let p = Project::open(&a.path, None)?;
             let id = p.store.correct(
@@ -693,6 +823,104 @@ fn print_json(v: &serde_json::Value) {
         "{}",
         serde_json::to_string_pretty(v).unwrap_or_else(|_| "{}".into())
     );
+}
+
+/// 读取批量输入：CSV/TSV 文件、JSON 数组文件、`-`（标准输入读 JSON）或内联 JSON。
+fn read_rows_input(from: &str) -> Result<Vec<Row>, CercisError> {
+    if from == "-" {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        return parse_json_rows(&buf, "<stdin>");
+    }
+
+    let path = Path::new(from);
+    if path.is_file() {
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        return match ext.as_str() {
+            "csv" => read_delimited_rows(path, b','),
+            "tsv" => read_delimited_rows(path, b'\t'),
+            _ => {
+                let text = std::fs::read_to_string(path)?;
+                parse_json_rows(&text, from)
+            }
+        };
+    }
+
+    let trimmed = from.trim_start();
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        return parse_json_rows(from, "<inline>");
+    }
+    Err(CercisError::NotFound(format!("输入文件不存在: {from}")))
+}
+
+/// 解析分隔符文本（首行为表头）。
+fn read_delimited_rows(path: &Path, delimiter: u8) -> Result<Vec<Row>, CercisError> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .delimiter(delimiter)
+        .from_path(path)?;
+
+    let headers: Vec<String> = rdr
+        .headers()?
+        .iter()
+        .map(|s| s.trim().to_string())
+        .collect();
+    if headers.is_empty() || headers.iter().any(|h| h.is_empty()) {
+        return Err(CercisError::Invalid(format!(
+            "{} 的表头为空或存在空列名",
+            path.display()
+        )));
+    }
+
+    let mut rows = Vec::new();
+    for (i, rec) in rdr.records().enumerate() {
+        let rec = rec.map_err(|e| {
+            CercisError::Invalid(format!("{} 第 {} 行解析失败: {e}", path.display(), i + 2))
+        })?;
+        let mut row = Row::new();
+        for (j, col) in headers.iter().enumerate() {
+            row.insert(col.clone(), rec.get(j).unwrap_or("").to_string());
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+/// 解析 JSON：数组（每个元素是对象）或单个对象；标量一律转成字符串。
+fn parse_json_rows(text: &str, source: &str) -> Result<Vec<Row>, CercisError> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| CercisError::Invalid(format!("{source} 不是合法 JSON: {e}")))?;
+    let items = match value {
+        serde_json::Value::Array(items) => items,
+        obj @ serde_json::Value::Object(_) => vec![obj],
+        other => {
+            return Err(CercisError::Invalid(format!(
+                "{source} 需要 JSON 数组或对象，实际是 {other}"
+            )))
+        }
+    };
+
+    let mut rows = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let obj = item.as_object().ok_or_else(|| {
+            CercisError::Invalid(format!("{source} 第 {} 项不是 JSON 对象", i + 1))
+        })?;
+        let mut row = Row::new();
+        for (k, v) in obj {
+            let cell = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            row.insert(k.clone(), cell);
+        }
+        rows.push(row);
+    }
+    Ok(rows)
 }
 
 fn hostname_or(fallback: &str) -> String {

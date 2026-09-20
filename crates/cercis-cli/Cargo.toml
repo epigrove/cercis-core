@@ -14,3 +14,4 @@ path = "src/main.rs"
 cercis-core = { path = "../cercis-core", version = "0.1.0" }
 clap = { workspace = true }
 serde_json = { workspace = true }
+csv = { workspace = true }

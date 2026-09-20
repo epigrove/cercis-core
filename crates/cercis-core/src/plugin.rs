@@ -80,6 +80,10 @@ pub struct UiExtension {
     /// 插入位置提示（可选）
     #[serde(default)]
     pub placement: String,
+    /// `command` 扩展点专用：调用插件入口时传的参数（如 `data import`）。
+    /// 留空时退回用 `id`（把点号换成空格），因此老插件不需要改。
+    #[serde(default)]
+    pub command: String,
 }
 
 impl UiExtension {
@@ -96,6 +100,15 @@ impl UiExtension {
                 | "export_format"
                 | "theme"
         )
+    }
+
+    /// 调用入口时实际使用的参数文本。
+    pub fn invocation(&self) -> String {
+        if !self.command.trim().is_empty() {
+            return self.command.trim().to_string();
+        }
+        // 约定：扩展点 id 用点分层级（`data.import`），退化成子命令（`data import`）
+        self.id.trim().replace('.', " ")
     }
 }
 
@@ -424,6 +437,22 @@ description: 导出 SPSS 语法与数据文件
         assert!(!tr.is_trusted("export_spss", "def"), "内容变化后信任失效");
         tr.untrust("export_spss");
         assert!(!tr.is_trusted("export_spss", "abc"));
+    }
+
+    #[test]
+    fn command_extension_carries_invocation() {
+        let m = PluginManifest::from_yaml(SAMPLE).unwrap();
+        let export = m.ui.iter().find(|u| u.kind == "menu").unwrap();
+        // 未写 command 时，用扩展点 id 退化（export.spss → "export spss"）
+        assert_eq!(export.invocation(), "export spss");
+
+        let with_command = SAMPLE.replace(
+            "  - kind: menu\n    id: export.spss",
+            "  - kind: command\n    id: data.import\n    command: data import\n    label_cn: 导入数据\n    label_en: Import data\n  - kind: menu\n    id: export.spss",
+        );
+        let m2 = PluginManifest::from_yaml(&with_command).unwrap();
+        let import = m2.ui.iter().find(|u| u.id == "data.import").unwrap();
+        assert_eq!(import.invocation(), "data import");
     }
 
     #[test]

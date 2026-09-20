@@ -60,6 +60,17 @@ pub struct Correction {
     pub status: String,
 }
 
+/// 批量写入的结果（导入等场景用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppendOutcome {
+    /// 本次写入的行数
+    pub rows_written: usize,
+    /// 写入后表内容的指纹（与流水的 `hash_after` 一致）
+    pub hash_after: String,
+    /// 批次号（整批共享，记入流水的 `batch_id`）
+    pub batch_id: String,
+}
+
 /// 存储层：绑定到某个项目目录。
 pub struct Store {
     root: std::path::PathBuf,
@@ -169,6 +180,75 @@ impl Store {
             }
         }
         table.push(row);
+        self.persist_with_log(&table, action, target_id, summary, "", "")?;
+        Ok(())
+    }
+
+    /// 批量追加多行（**一次事务、一条流水**）。
+    ///
+    /// 与逐行追加的区别，正是导入场景需要的两点：
+    /// - **一次事务**：先把整批行校验完再落盘，中途失败不会留下"写了一半"的数据；
+    /// - **一条流水**：整批共享同一个 `batch_id` 与 `source_ref`，上万行导入
+    ///   不会把 `change_log.csv` 冲爆，也便于"这批数据从哪来"的追溯。
+    ///
+    /// `source_ref` 建议写导入源文件路径；`action` 建议用 `import`。
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_rows(
+        &self,
+        table_name: &str,
+        columns: &[&str],
+        rows: Vec<Row>,
+        action: &str,
+        summary: &str,
+        source_ref: &str,
+    ) -> Result<AppendOutcome> {
+        if rows.is_empty() {
+            return Err(CercisError::Invalid("批量写入的行数为 0".into()));
+        }
+        let mut table = self.load_table(table_name, columns)?;
+        // 结构校验：整批行都必须只用已存在的列（先全查，再落盘）
+        for (i, row) in rows.iter().enumerate() {
+            for k in row.keys() {
+                if !table.columns.contains(k) {
+                    return Err(CercisError::Invalid(format!(
+                        "第 {} 行含有表 {table_name} 中不存在的列 {k}（请先扩展表结构）",
+                        i + 1
+                    )));
+                }
+            }
+        }
+
+        let rows_written = rows.len();
+        for row in rows {
+            table.push(row);
+        }
+        let batch_id = crate::ids::new_machine_id();
+        let hash_after =
+            self.persist_with_log(&table, action, "", summary, source_ref, &batch_id)?;
+        Ok(AppendOutcome {
+            rows_written,
+            hash_after,
+            batch_id,
+        })
+    }
+
+    /// 内部：把改好的表落盘，并写一条流水（单行与批量共用）。
+    ///
+    /// 落盘前把旧内容存入对象库（逐次存档），因此任何一次写入都可回溯。
+    fn persist_with_log(
+        &self,
+        table: &Table,
+        action: &str,
+        target_id: &str,
+        summary: &str,
+        source_ref: &str,
+        batch_id: &str,
+    ) -> Result<String> {
+        let table_name = table
+            .path()
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         let before = crate::tx::read_optional(table.path())?;
         let hash_before = before
             .as_ref()
@@ -181,17 +261,20 @@ impl Store {
         let hash_after = self.objects.put(after_text.as_bytes())?;
         table.save()?;
 
-        self.append_change(&ChangeEntry::new(
+        let mut entry = ChangeEntry::new(
             &self.identity.user_id,
             &self.identity.device_for_log(),
             action,
-            table_name,
+            &table_name,
             target_id,
             summary,
             &hash_before,
             &hash_after,
-        ))?;
-        Ok(())
+        );
+        entry.batch_id = batch_id.to_string();
+        entry.source_ref = source_ref.to_string();
+        self.append_change(&entry)?;
+        Ok(hash_after)
     }
 
     /// 记录一条更正（不覆盖原值）。
