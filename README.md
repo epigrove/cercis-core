@@ -44,6 +44,7 @@ cercis query <目录> --table records --filter value_num gt 10 --sort date:desc
 cercis validate <目录>                        # 引用完整性 + 字段规则
 cercis correct <目录> --table records --target R-1 --field value_num --old 1 --new 2 --reason 誊写笔误
 cercis log <目录> --limit 20                  # 谁/哪台设备/何时改了什么
+cercis note <目录> --action export --summary "导出 3 行到 /tmp/x.csv"   # 插件记录导出等动作
 cercis plugins <目录> / cercis trust <目录> --id <插件ID>
 ```
 

@@ -13,6 +13,7 @@ use cercis_core::query::{Op, Query, SortDir};
 use cercis_core::store::Identity;
 use cercis_core::table::Row;
 use cercis_core::{CercisError, Project};
+use cercis_core::history::ChangeEntry;
 
 /// Cercis —— 愿瑟希斯捍卫你的思想。
 #[derive(Parser, Debug)]
@@ -46,6 +47,8 @@ enum Command {
     Correct(CorrectArgs),
     /// 查看变更流水
     Log(LogArgs),
+    /// 记一条流水（插件记录导出等动作；不改动数据文件）
+    Note(NoteArgs),
     /// 创建检查点（文件级备份）
     Checkpoint(CheckpointArgs),
     /// 还原某个历史对象到文件（回滚 = 新变更）
@@ -223,6 +226,27 @@ struct LogArgs {
     path: PathBuf,
     #[arg(long, default_value_t = 20)]
     limit: usize,
+}
+
+#[derive(Args, Debug)]
+struct NoteArgs {
+    /// 项目目录
+    path: PathBuf,
+    /// 动作类型：export / import / checkpoint / …
+    #[arg(long)]
+    action: String,
+    /// 影响对象所在的表（可空）
+    #[arg(long, default_value = "")]
+    table: String,
+    /// 影响对象的编号（可空）
+    #[arg(long, default_value = "")]
+    target: String,
+    /// 一句话说明（谁做了什么、结果如何）
+    #[arg(long)]
+    summary: String,
+    /// 来源说明（导出文件路径等）
+    #[arg(long, default_value = "")]
+    source_ref: String,
 }
 
 #[derive(Args, Debug)]
@@ -783,6 +807,40 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                         e.ts, e.action, e.target_table, e.target_id, e.summary
                     );
                 }
+            }
+        }
+
+        Command::Note(a) => {
+            let p = Project::open(&a.path, None)?;
+            if a.action.trim().is_empty() || a.summary.trim().is_empty() {
+                return Err(CercisError::Invalid(
+                    "note 需要 --action 与 --summary（这条流水说明了什么）".into(),
+                ));
+            }
+            let mut entry = ChangeEntry::new(
+                &p.store.identity.user_id,
+                &p.store.identity.device_for_log(),
+                a.action.trim(),
+                &a.table,
+                &a.target,
+                &a.summary,
+                "",
+                "",
+            );
+            entry.source_ref = a.source_ref.clone();
+            entry.tool_version = cercis_core::CORE_VERSION.to_string();
+            p.store.append_change(&entry)?;
+
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "change_id": entry.change_id,
+                    "action": entry.action,
+                    "ts": entry.ts,
+                }));
+            } else {
+                println!("已记入流水：{}（{}）", entry.action, entry.summary);
             }
         }
 
