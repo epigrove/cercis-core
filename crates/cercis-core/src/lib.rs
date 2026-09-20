@@ -55,7 +55,7 @@ pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 项目结构版本：升级时用于迁移。
 pub const SCHEMA_VERSION: u32 = 1;
 
-pub use ai::AiContract;
+pub use ai::{AgentSkill, AiContract};
 pub use config::ProjectConfig;
 pub use error::{CercisError, Result};
 pub use manifest::Manifest;

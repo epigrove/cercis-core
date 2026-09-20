@@ -4,6 +4,11 @@
 //! - `AGENTS.md`：AI 助手的项目说明书（人也能读）
 //! - `CLAUDE.md`：其他 AI 工具的入口（指向 AGENTS.md，不重复维护）
 //! - `_labnote/ai_contract.json`：机器可读契约（表/列/类型/约束/常用命令）
+//! - `_labnote/skill/cercis/`：**Agent 技能包**（装到 Codex / Claude Code 的技能目录用）
+//!
+//! 前两样是**随项目走**的：AI 打开项目才读到。技能包是**装在 AI 宿主上**的：
+//! 它在 AI 碰项目之前就告诉它"这是什么项目、该怎么做、有哪些红线"。
+//! 三者的内容都从同一份契约渲染，避免出现互相矛盾的三套说法。
 //!
 //! ## 原则
 //! 1. **只读默认**：AI 不得未经确认写入
@@ -97,7 +102,11 @@ impl AiContract {
             cmd("cercis checkpoint <项目>", "创建检查点（文件级备份）", "cercis checkpoint ./项目 --note '分析前快照'"),
             cmd("cercis manifest <项目>", "生成/刷新机器清单", "cercis manifest ./项目"),
             cmd("cercis append <项目> --table <表> --set 列=值", "写入一行（需用户确认）", "cercis append ./项目 --table records --set record_id=R-0001 --set value_num=12.5"),
+            cmd("cercis append-many <项目> --table <表> --from <文件>", "批量写入/导入（先加 --dry-run 试运行）", "cercis append-many ./项目 --table records --from 数据.csv --dry-run --json"),
             cmd("cercis correct <项目> --table <表> --target <编号> --field <列> --old <旧值> --new <新值>", "记录更正（不覆盖原值）", "cercis correct ./项目 --table records --target R-0001 --field value_num --old 12.5 --new 12.7 --reason '笔误'"),
+            cmd("cercis note <项目> --action <动作> --summary <说明>", "记一条流水（导出等动作留痕）", "cercis note ./项目 --action export --summary '导出 observations 到 /tmp/out.csv' --source-ref /tmp/out.csv"),
+            cmd("cercis agents <项目>", "刷新 AI 材料与 Agent 技能包", "cercis agents ./项目"),
+            cmd("cercis skill <项目>", "生成 Agent 技能包（--install codex|claude 可直接装）", "cercis skill ./项目 --install codex"),
         ];
 
         Self {
@@ -116,10 +125,10 @@ impl AiContract {
                 "涉及真实数据的操作前，先确认用户意图".into(),
             ],
             forbidden: vec![
-                "不访问项目之外的私人文件夹".into(),
-                "不把任何真实数据写入分享包或发布物".into(),
-                "不绕过内核直接修改 tables/*.csv".into(),
-                "不删除 history/ 与 corrections（历史与更正必须可追溯）".into(),
+                "访问项目之外的私人文件夹".into(),
+                "把任何真实数据写入分享包或发布物".into(),
+                "绕过内核直接修改 tables/*.csv".into(),
+                "删除 history/ 与 corrections（历史与更正必须可追溯）".into(),
             ],
         }
     }
@@ -141,6 +150,175 @@ fn cmd(name: &str, purpose: &str, example: &str) -> ContractCommand {
         purpose: purpose.into(),
         example: example.into(),
     }
+}
+
+/// Agent 技能包：给 Codex / Claude Code 这类 AI 宿主用的操作手册。
+///
+/// ## 为什么由内核生成
+/// 技能包里的命令速查必须与 [`AiContract`] **同源**。若各自手写，
+/// `AGENTS.md`、`ai_contract.json`、技能包三份迟早互相矛盾——而 AI 恰恰
+/// 会同时读到它们，矛盾就等于没有规则。
+///
+/// ## 技能包的定位
+/// - **不是插件**：它不跑在 Cercis 里，而是跑在用户的 AI 宿主里；
+///   插件管"在 app 里能点什么"，技能包管"AI 知道该怎么干"。
+/// - **不含项目数据**：只有操作方法与命令，因此可以随分享包、发布物一起给同行。
+/// - **项目细节不写死**：具体表、字段、规则永远以项目内的
+///   `AGENTS.md` 与 `ai_contract.json` 为准，技能包只讲"怎么读、怎么做"。
+#[derive(Debug, Clone)]
+pub struct AgentSkill {
+    /// 技能名（同时是安装目录名）
+    pub name: String,
+    /// 一句话说明（frontmatter 的 description，AI 按它决定何时加载本技能）
+    pub description: String,
+    /// `SKILL.md`：什么时候用、红线、操作配方
+    pub skill_md: String,
+    /// `reference.md`：完整命令速查（与契约同源）
+    pub reference_md: String,
+}
+
+/// 生成技能包时，前端写法（Codex 与 Claude Code 都用 `name` + `description`）。
+const SKILL_NAME: &str = "cercis";
+
+/// 技能的一句话说明：AI 宿主靠它判断"什么时候该加载这个技能"。
+fn skill_description() -> String {
+    "Use when working inside a Cercis project folder (one containing project.yaml and \
+tables/*.csv), or when the user asks to query, record, correct, import, export, or health-check \
+Cercis data. Cercis 项目的取数、录入、更正、导入导出与体检操作技能。"
+        .to_string()
+}
+
+impl AgentSkill {
+    /// 由契约生成技能包（契约是唯一事实来源）。
+    pub fn build(contract: &AiContract) -> Self {
+        Self {
+            name: SKILL_NAME.to_string(),
+            description: skill_description(),
+            skill_md: skill_md(contract),
+            reference_md: reference_md(contract),
+        }
+    }
+
+    /// 写入某个目录下的 `<name>/` 子目录（SKILL.md + reference.md）。
+    pub fn write(&self, dir: impl AsRef<Path>) -> Result<std::path::PathBuf> {
+        let target = dir.as_ref().join(&self.name);
+        tx::write_atomic_str(&target.join("SKILL.md"), &self.skill_md)?;
+        tx::write_atomic_str(&target.join("reference.md"), &self.reference_md)?;
+        Ok(target)
+    }
+
+    /// 项目内的默认位置：`_labnote/skill/`。
+    pub fn write_into_project(&self, project_root: impl AsRef<Path>) -> Result<std::path::PathBuf> {
+        let dir = project_root.as_ref().join("_labnote").join("skill");
+        self.write(dir)
+    }
+}
+
+/// 生成 `SKILL.md`：什么时候用、开工前读什么、红线、配方。
+fn skill_md(contract: &AiContract) -> String {
+    let version = crate::CORE_VERSION;
+    let mut s = String::new();
+    s.push_str("---\n");
+    s.push_str(&format!("name: {}\n", SKILL_NAME));
+    s.push_str(&format!("description: {}\n", skill_description()));
+    s.push_str("---\n\n");
+    s.push_str(&format!(
+        "# Cercis 项目操作技能（内核 v{version} 生成）\n\n"
+    ));
+    s.push_str("> 本文件由 Cercis 内核生成，**请勿手工编辑**；改模板后重新运行 `cercis agents` 即可。\n\n");
+
+    s.push_str("## 什么时候用这个技能\n\n");
+    s.push_str("- 用户让你在一个 Cercis 项目里查数据、录数据、更正、导入导出或体检；\n");
+    s.push_str("- 目录里能看到 `project.yaml`、`tables/*.csv` 或 `_labnote/ai_contract.json`；\n");
+    s.push_str("- 用户提到 Cercis、`cercis` 命令、AGENTS.md、机器清单或数据契约。\n\n");
+
+    s.push_str("## 开工前先读三份文件（顺序固定）\n\n");
+    s.push_str("| 顺序 | 文件 | 读它做什么 |\n|---|---|---|\n");
+    s.push_str("| 1 | `AGENTS.md` | 项目说明书：背景、数据位置、规则、禁止事项 |\n");
+    s.push_str("| 2 | `_labnote/manifest.json` | 机器索引：有哪些表、多少行、何时更新 |\n");
+    s.push_str("| 3 | `_labnote/ai_contract.json` | 机器契约：表/列/类型/约束/可用命令 |\n\n");
+    s.push_str("项目里的这三份文件永远比本技能更权威：本技能只讲**怎么做**，它们讲**这个项目是什么**。\n\n");
+
+    s.push_str("## 环境\n\n");
+    s.push_str("```bash\n# 找到内核命令（按顺序尝试）\n$CERCIS_BIN            # 环境变量\ncommand -v cercis      # PATH\ndirname \"$APP\" | xargs -I{} sh -c 'ls {}/cercis'   # 与 app 同级\n```\n\n");
+    s.push_str("所有命令都支持 `--json`（带 schema 版本）；AI 应优先用 `--json` 解析结果，而不是猜文本格式。\n\n");
+
+    s.push_str("## 红线（违反则数据不可信）\n\n");
+    for rule in &contract.rules {
+        s.push_str(&format!("- {rule}\n"));
+    }
+    for forbidden in &contract.forbidden {
+        s.push_str(&format!("- **禁止**：{forbidden}\n"));
+    }
+    s.push('\n');
+
+    s.push_str("## 六个操作配方\n\n");
+    s.push_str("### 1. 查数据（只读）\n\n");
+    s.push_str("先看结构，再查内容；筛选结果要能复现（把命令原样给用户）。\n\n");
+    s.push_str("```bash\ncercis template <项目> --json\ncercis query <项目> --table <表> --filter <列> <运算符> <值> --sort <列>:desc --json\n```\n\n");
+    s.push_str("### 2. 批量导入：必须先试运行\n\n");
+    s.push_str("```bash\ncercis append-many <项目> --table <表> --from <文件.csv> --dry-run --json   # 先看会发生什么\ncercis append-many <项目> --table <表> --from <文件.csv> --source-ref <文件.csv> --json  # 用户确认后再写\n```\n\n");
+    s.push_str("一次导入 = 一次事务 + 一条流水；模板之外的列默认会被拒绝（不要用 `--allow-new-columns` 绕过，除非用户明确要求）。\n\n");
+    s.push_str("### 3. 录入单行 / 更正值\n\n");
+    s.push_str("```bash\ncercis append <项目> --table <表> --set 列=值 --target <编号> --json\ncercis correct <项目> --table <表> --target <编号> --field <列> --old <旧值> --new <新值> --reason '<原因>' --json\n```\n\n");
+    s.push_str("**永远不要**用改 CSV 的方式修改已录入的值——那会同时破坏留痕与历史。\n\n");
+    s.push_str("### 4. 导出（要能回溯）\n\n");
+    s.push_str("导出后必须能回答\"这批数字是从哪一版数据来的\"：带上筛选条件、排序与说明书。\n");
+    s.push_str("装了基础工具包时优先用 `cercis-plugin-transfer export --readme`；只用内核时用 `cercis query` 取数后自行写出，并 `cercis note` 记一条流水。\n\n");
+    s.push_str("### 5. 体检与校验\n\n");
+    s.push_str("```bash\ncercis validate <项目> --json     # 引用完整性 + 字段规则\ncercis-plugin-health --project <项目> --json   # 装了基础工具包时：断链/编码/命名/孤儿附件\n```\n\n");
+    s.push_str("### 6. 改结构（模板）要先问人\n\n");
+    s.push_str("加列、改类型、换模板都会影响既有数据，属于**用户决策**：先说清影响，得到确认再执行。\n\n");
+
+    s.push_str("## 命令速查（与 `ai_contract.json` 同源）\n\n");
+    s.push_str("| 命令 | 用途 |\n|---|---|\n");
+    for c in &contract.commands {
+        s.push_str(&format!("| `{}` | {} |\n", c.name, c.purpose));
+    }
+    s.push('\n');
+    s.push_str("完整示例见同目录 `reference.md`。\n");
+    s
+}
+
+/// 生成 `reference.md`：完整命令速查 + 示例 + 契约摘要。
+fn reference_md(contract: &AiContract) -> String {
+    let mut s = String::new();
+    s.push_str("# Cercis 命令速查（reference）\n\n");
+    s.push_str(&format!(
+        "> 由 Cercis 内核 v{} 生成；与 `_labnote/ai_contract.json` 同源，请勿手工编辑。\n\n",
+        crate::CORE_VERSION
+    ));
+    s.push_str(&format!(
+        "项目：{} ｜ 契约版本：{} ｜ 插件接口版本：{}\n\n",
+        contract.project_name, contract.schema, contract.plugin_api_version
+    ));
+
+    s.push_str("## 内核命令\n\n");
+    for c in &contract.commands {
+        s.push_str(&format!("### {}\n\n", c.name));
+        s.push_str(&format!("用途：{}\n\n", c.purpose));
+        s.push_str(&format!("```bash\n{}\n```\n\n", c.example));
+    }
+
+    s.push_str("## 插件命令（装了基础工具包时可用）\n\n");
+    s.push_str("| 命令 | 用途 |\n|---|---|\n");
+    s.push_str("| `cercis-plugin-wizard --project <新目录> --name <名称> --template generic\\|example-study --allow-write` | 新建项目 |\n");
+    s.push_str("| `cercis-plugin-entry append --project <项目> --table <表> --from <文件> --allow-write` | 批量录入（写入前查列名/必填/主键/引用） |\n");
+    s.push_str("| `cercis-plugin-entry attach --project <项目> --table <表> --file <文件> --allow-write` | 附件挂接 |\n");
+    s.push_str("| `cercis-plugin-transfer import --project <项目> --table <表> --file <文件> [--dry-run] [--report <md>] --allow-write` | CSV 导入（可出报告） |\n");
+    s.push_str("| `cercis-plugin-transfer export --project <项目> --table <表> --out <目录> [--wide <列> --value <列>] --readme --allow-write` | 导出（长表/宽表 + 说明书） |\n");
+    s.push_str("| `cercis-plugin-health --project <项目>` | 体检（只读插件） |\n\n");
+
+    s.push_str("## 规则（来自契约）\n\n");
+    for rule in &contract.rules {
+        s.push_str(&format!("- {rule}\n"));
+    }
+    s.push('\n');
+    s.push_str("## 禁止事项（来自契约）\n\n");
+    for f in &contract.forbidden {
+        s.push_str(&format!("- {f}\n"));
+    }
+    s
 }
 
 /// 生成 AGENTS.md 内容。
@@ -221,7 +399,7 @@ pub fn claude_md() -> String {
         .to_string()
 }
 
-/// 一次生成全套装材料（AGENTS.md、CLAUDE.md、契约、清单）。
+/// 一次生成全套装材料（AGENTS.md、CLAUDE.md、契约、清单、Agent 技能包）。
 pub fn refresh_all(root: impl AsRef<Path>) -> Result<Manifest> {
     let root = root.as_ref();
     if !root.join("project.yaml").exists() {
@@ -247,6 +425,9 @@ pub fn refresh_all(root: impl AsRef<Path>) -> Result<Manifest> {
     )?;
     tx::write_atomic_str(&root.join("CLAUDE.md"), &claude_md())?;
 
+    // Agent 技能包：随项目生成一份，安装到 Codex / Claude Code 用（见 AgentSkill）
+    AgentSkill::build(&contract).write_into_project(root)?;
+
     Ok(manifest)
 }
 
@@ -271,6 +452,72 @@ mod tests {
         assert!(contract.contains("cercis.ai_contract/1"));
 
         assert!(dir.join("CLAUDE.md").exists());
+
+        // 技能包随 AGENTS 一起生成，且能被 AI 宿主识别
+        let skill = std::fs::read_to_string(dir.join("_labnote/skill/cercis/SKILL.md")).unwrap();
+        assert!(skill.starts_with("---\nname: cercis\n"));
+        assert!(skill.contains("description:"));
+        assert!(skill.contains("禁止"));
+        assert!(dir.join("_labnote/skill/cercis/reference.md").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 技能包里的命令速查必须与 `ai_contract.json` **完全同源**。
+    ///
+    /// 这条测试盯的是"三份文案互相矛盾"这个具体风险：
+    /// 契约改了命令、技能包没跟上，AI 就会照着过期手册干活。
+    #[test]
+    fn skill_commands_match_contract_exactly() {
+        let dir = std::env::temp_dir().join("cercis-skill-drift-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = crate::Project::create(&dir, "技能包测试", Identity::default()).unwrap();
+        refresh_all(p.root()).unwrap();
+
+        let contract_text = std::fs::read_to_string(dir.join("_labnote/ai_contract.json")).unwrap();
+        let contract: AiContract = serde_json::from_str(&contract_text).unwrap();
+        let skill = std::fs::read_to_string(dir.join("_labnote/skill/cercis/SKILL.md")).unwrap();
+        let reference =
+            std::fs::read_to_string(dir.join("_labnote/skill/cercis/reference.md")).unwrap();
+
+        // 1) 每条契约命令都出现在两份文件里
+        for c in &contract.commands {
+            assert!(
+                skill.contains(&c.name),
+                "SKILL.md 缺少契约里的命令：{}",
+                c.name
+            );
+            assert!(
+                reference.contains(&c.name),
+                "reference.md 缺少契约里的命令：{}",
+                c.name
+            );
+            assert!(
+                reference.contains(&c.example),
+                "reference.md 缺少示例：{}",
+                c.example
+            );
+        }
+
+        // 2) 数量也要对得上（多了说明手写掺进来，少了说明漏渲染）
+        let skill_rows = skill
+            .lines()
+            .filter(|l| l.starts_with("| `cercis ") && l.ends_with(" |"))
+            .count();
+        assert_eq!(
+            skill_rows,
+            contract.commands.len(),
+            "技能包命令表行数与契约不一致"
+        );
+
+        // 3) 红线与禁止事项同样来自契约
+        for rule in &contract.rules {
+            assert!(skill.contains(rule), "SKILL.md 缺少规则：{rule}");
+        }
+        for f in &contract.forbidden {
+            assert!(skill.contains(f), "SKILL.md 缺少禁止事项：{f}");
+        }
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

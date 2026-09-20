@@ -61,8 +61,10 @@ enum Command {
     Query(QueryArgs),
     /// 校验项目（引用完整性 + 字段规则）
     Validate(ProjectArg),
-    /// 刷新机器清单与 AI 材料（AGENTS.md / CLAUDE.md / ai_contract.json）
+    /// 刷新机器清单与 AI 材料（AGENTS.md / CLAUDE.md / ai_contract.json / 技能包）
     Agents(ProjectArg),
+    /// 生成 AI Agent 技能包（装到 Codex / Claude Code 用）
+    Skill(SkillArgs),
     /// 生成机器清单
     ManifestCmd(ProjectArg),
     /// 列出插件（全局与项目内；项目内默认未信任）
@@ -133,6 +135,18 @@ struct PluginsArgs {
     /// 全局插件目录（可选）
     #[arg(long)]
     global_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct SkillArgs {
+    /// 项目目录（技能包按它的模板与契约生成）
+    path: PathBuf,
+    /// 写到指定目录（默认写进项目 `_labnote/skill/`）
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// 直接装到 AI 宿主的技能目录：codex（~/.codex/skills）或 claude（~/.claude/skills）
+    #[arg(long)]
+    install: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -456,6 +470,55 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                 println!("  CLAUDE.md（其他 AI 工具入口）");
                 println!("  _labnote/manifest.json（机器清单）");
                 println!("  _labnote/ai_contract.json（机器契约）");
+                println!("  _labnote/skill/cercis/（Agent 技能包，装到 Codex / Claude Code 用）");
+            }
+        }
+
+        Command::Skill(a) => {
+            if a.out.is_some() && a.install.is_some() {
+                return Err(CercisError::Invalid(
+                    "--out 与 --install 只能用一个（前者写到你指定的目录，后者装进 AI 宿主）".into(),
+                ));
+            }
+            let p = Project::open(&a.path, None)?;
+            let manifest = cercis_core::Manifest::generate(&a.path)?;
+            let contract = cercis_core::AiContract::build(&p.template()?, &manifest);
+            let skill = cercis_core::AgentSkill::build(&contract);
+
+            let (target, host) = if let Some(host) = a.install.as_deref() {
+                (skill.write(skill_host_dir(host)?)?, Some(host.to_string()))
+            } else if let Some(out) = a.out.as_ref() {
+                (skill.write(out)?, None)
+            } else {
+                (skill.write_into_project(&a.path)?, None)
+            };
+
+            let files = vec![
+                target.join("SKILL.md").display().to_string(),
+                target.join("reference.md").display().to_string(),
+            ];
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "skill": skill.name,
+                    "target": target.display().to_string(),
+                    "host": host,
+                    "files": files,
+                    "commands": contract.commands.len(),
+                }));
+            } else {
+                println!("已生成 Agent 技能包：{}", target.display());
+                for f in &files {
+                    println!("  {f}");
+                }
+                println!(
+                    "说明：技能包与 _labnote/ai_contract.json 同源（{} 条命令）；改模板后重新生成即可。",
+                    contract.commands.len()
+                );
+                if host.is_none() {
+                    println!("安装：cercis skill <项目> --install codex（或 claude）");
+                }
             }
         }
 
@@ -881,6 +944,20 @@ fn print_json(v: &serde_json::Value) {
         "{}",
         serde_json::to_string_pretty(v).unwrap_or_else(|_| "{}".into())
     );
+}
+
+/// AI 宿主的技能目录（技能包要装到这里才会被自动加载）。
+fn skill_host_dir(host: &str) -> Result<PathBuf, CercisError> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| CercisError::Invalid("取不到 HOME，无法定位技能目录".into()))?;
+    match host {
+        "codex" => Ok(home.join(".codex").join("skills")),
+        "claude" => Ok(home.join(".claude").join("skills")),
+        other => Err(CercisError::Invalid(format!(
+            "未知的宿主 {other}（可用：codex / claude；其他宿主请用 --out <目录>）"
+        ))),
+    }
 }
 
 /// 读取批量输入：CSV/TSV 文件、JSON 数组文件、`-`（标准输入读 JSON）或内联 JSON。

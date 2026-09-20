@@ -18,6 +18,7 @@ Cercis 内核：**行业普适的"文件夹即数据库"引擎**。
 - [x] 查询原语（组合筛选 + 排序 + 分页，结果可复现）
 - [x] 引用完整性与字段校验
 - [x] 机器清单 + AI 契约（`AGENTS.md` / `CLAUDE.md` / `manifest.json` / `ai_contract.json`）
+- [x] **Agent 技能包**（`_labnote/skill/cercis/`）：装到 Codex / Claude Code 用的操作手册，与契约同源生成
 - [x] 插件协议（清单、权限、界面扩展点、信任绑定内容指纹）
 - [x] 命令行（`cercis`，含 `--json`）
 
@@ -25,7 +26,7 @@ Cercis 内核：**行业普适的"文件夹即数据库"引擎**。
 
 ```bash
 cd kernel
-cargo test          # 运行测试（43 个：38 单元 + 3 批量导入 + 2 S1 全流程）
+cargo test          # 运行测试（44 个：39 单元 + 3 批量导入 + 2 S1 全流程）
 cargo build         # 构建内核与命令行
 cargo run -p cercis-cli -- --help
 ```
@@ -45,6 +46,8 @@ cercis validate <目录>                        # 引用完整性 + 字段规则
 cercis correct <目录> --table records --target R-1 --field value_num --old 1 --new 2 --reason 誊写笔误
 cercis log <目录> --limit 20                  # 谁/哪台设备/何时改了什么
 cercis note <目录> --action export --summary "导出 3 行到 /tmp/x.csv"   # 插件记录导出等动作
+cercis agents <目录>                          # 刷新 AGENTS.md / 契约 / 清单 / Agent 技能包
+cercis skill <目录> --install codex           # 把 Agent 技能包装到 ~/.codex/skills/
 cercis plugins <目录> / cercis trust <目录> --id <插件ID>
 ```
 
