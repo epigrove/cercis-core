@@ -111,7 +111,10 @@ pub enum RegState {
 /// 一条登记。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Registration {
-    /// 登记编号（ULID，天然按时间排序，"倒序回滚"就靠它）
+    /// 登记编号（ULID；人类可读、按时间大致有序）
+    ///
+    /// 注意：回滚顺序**不按它排**——同一毫秒里登记的几条，ULID 的随机后缀不保证顺序。
+    /// 顺序以台账里的**记录顺序**为准（[`Registry::plan_revert`]）。
     pub id: String,
     /// 哪个插件登记的
     pub plugin: String,
@@ -265,9 +268,17 @@ impl Registry {
 
     /// 计划回滚：某个插件**倒序**的生效登记（只算账，不动文件）。
     pub fn plan_revert(&self, plugin: &str) -> Vec<Registration> {
-        let mut list: Vec<Registration> = self.active_of(plugin).into_iter().cloned().collect();
-        list.sort_by(|a, b| b.id.cmp(&a.id)); // ULID 大的先撤 = LIFO
-        list
+        // 顺序 = 台账里的记录顺序（= 登记发生的顺序），倒着来就是 LIFO。
+        // 不用 ULID 排序：同一毫秒内的两条，ULID 后缀是随机的，排出来会乱。
+        let mut list: Vec<(usize, Registration)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.plugin == plugin && e.state == RegState::Active)
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        list.sort_by(|a, b| b.0.cmp(&a.0));
+        list.into_iter().map(|(_, e)| e).collect()
     }
 
     /// 执行回滚（`dry_run` = 只算账、不动文件、不改台账）。
