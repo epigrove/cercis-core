@@ -369,13 +369,27 @@ impl Store {
         Ok(created)
     }
 
-    /// 载入某张表并按模板检查列是否齐全。
+    /// 载入某张表：**模板里有就按模板，模板里没有但文件在就按现有 CSV 读**。
+    ///
+    /// 为什么允许读"模板外的表"：项目里除了模板声明的业务表，还有
+    /// **系统表**（`corrections`、`change_log`）与**插件自建的表**（例如附件索引）。
+    /// 它们不在模板里，但确实躺在项目的 `tables/` 目录下——按"文件夹即数据库"
+    /// 的定位，看得见就该读得到（这是 S6 验收的发现 F-01）。
+    ///
+    /// 注意边界：**读放宽，写不放松**。写入仍然只走 `append` / `correct` 等通道，
+    /// 模板外的表也不会被自动建列（要新列得显式说明）。
     pub fn load_table_with_template(&self, name: &str, t: &Template) -> Result<Table> {
-        let td = t
-            .table(name)
-            .ok_or_else(|| CercisError::NotFound(format!("模板中没有表: {name}")))?;
-        let cols: Vec<&str> = td.fields.iter().map(|f| f.name.as_str()).collect();
-        self.load_table(name, &cols)
+        if let Some(td) = t.table(name) {
+            let cols: Vec<&str> = td.fields.iter().map(|f| f.name.as_str()).collect();
+            return self.load_table(name, &cols);
+        }
+        let path = self.root().join("tables").join(format!("{name}.csv"));
+        if !path.exists() {
+            return Err(CercisError::NotFound(format!(
+                "表不存在: {name}（模板里没有定义，项目里也没有这个文件）"
+            )));
+        }
+        Table::load(&path)
     }
 }
 

@@ -170,12 +170,45 @@ impl Store {
         summary: &str,
         action: &str,
     ) -> Result<()> {
+        self.append_row_inner(table_name, columns, row, target_id, summary, action, false)
+    }
+
+    /// 追加一行，并允许**按这一行的列扩展表结构**（新增列追加到表末尾）。
+    ///
+    /// 用于"表已经存在、但用户要写一个新列"的场景（S6 发现 F-03：
+    /// `append-many` 有 `--allow-new-columns`，`append` 却没有）。
+    pub fn append_row_extending(
+        &self,
+        table_name: &str,
+        columns: &[&str],
+        row: Row,
+        target_id: &str,
+        summary: &str,
+    ) -> Result<()> {
+        self.append_row_inner(table_name, columns, row, target_id, summary, "create", true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_row_inner(
+        &self,
+        table_name: &str,
+        columns: &[&str],
+        row: Row,
+        target_id: &str,
+        summary: &str,
+        action: &str,
+        allow_new_columns: bool,
+    ) -> Result<()> {
         let mut table = self.load_table(table_name, columns)?;
-        // 结构校验：列名必须已存在
+        // 结构校验：列名必须已存在；显式允许时按这一行扩展出新列
         for k in row.keys() {
             if !table.columns.contains(k) {
+                if allow_new_columns {
+                    table.columns.push(k.clone());
+                    continue;
+                }
                 return Err(CercisError::Invalid(format!(
-                    "表 {table_name} 中不存在列 {k}（请先扩展表结构）"
+                    "表 {table_name} 中不存在列 {k}（请先扩展表结构，或加 --allow-new-columns）"
                 )));
             }
         }

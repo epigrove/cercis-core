@@ -185,6 +185,9 @@ struct AppendArgs {
     /// 单元格：允许重复，形如 --set col=value
     #[arg(long = "set", value_name = "COL=VALUE")]
     sets: Vec<String>,
+    /// 允许写入表里还不存在的列（按这一行自动扩展表结构）
+    #[arg(long)]
+    allow_new_columns: bool,
 }
 
 #[derive(Args, Debug)]
@@ -721,15 +724,23 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
             // 若表不存在，按本次提供的列创建（列名按字母序稳定）
             let owned: Vec<String> = row.keys().cloned().collect();
             let cols: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
-            p.store
-                .append_row(&a.table, &cols, row, &a.target, &a.summary)?;
+            if a.allow_new_columns {
+                p.store
+                    .append_row_extending(&a.table, &cols, row, &a.target, &a.summary)?;
+            } else {
+                p.store
+                    .append_row(&a.table, &cols, row, &a.target, &a.summary)?;
+            }
             if cli.json {
                 print_json(&serde_json::json!({
                     "schema": "cercis.cli/1",
                     "ok": true,
                     "table": a.table,
                     "target": a.target,
+                    "extended_columns": a.allow_new_columns,
                 }));
+            } else if a.allow_new_columns {
+                println!("已写入表 {}（必要时自动扩展了列；已留痕）", a.table);
             } else {
                 println!("已写入表 {}（已留痕）", a.table);
             }
