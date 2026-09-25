@@ -63,6 +63,12 @@ enum Command {
     Query(QueryArgs),
     /// 校验项目（引用完整性 + 字段规则）
     Validate(ProjectArg),
+    /// 列出值类型与约束（内核唯一定义；插件与 AI 照用）
+    ValueTypes,
+    /// 看某列该用什么类型（候选 + 置信度 + 反例；只建议，不改模板）
+    InferTypes(InferTypesArgs),
+    /// 改模板里的列类型/约束（写入；默认先给影响预览）
+    SetFieldType(SetFieldTypeArgs),
     /// 刷新机器清单与 AI 材料（AGENTS.md / CLAUDE.md / ai_contract.json / 技能包）
     Agents(ProjectArg),
     /// 生成 AI Agent 技能包（装到 Codex / Claude Code 用）
@@ -106,6 +112,81 @@ struct TermsArgs {
     /// 装入术语包文件（写入 <项目>/terms.yaml；不动数据）
     #[arg(long, value_name = "FILE")]
     file: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct InferTypesArgs {
+    /// 项目目录
+    path: PathBuf,
+    /// 只看某张表（默认扫描模板里所有已存在的表）
+    #[arg(long)]
+    table: Option<String>,
+    /// 只看某一列
+    #[arg(long)]
+    column: Option<String>,
+    /// 强建议门槛（默认 0.95，即 95% 的格子匹配才给建议）
+    #[arg(long, default_value_t = 0.95)]
+    min_confidence: f64,
+    /// 只列出"建议改类型"的列
+    #[arg(long)]
+    only_change: bool,
+}
+
+#[derive(Args, Debug)]
+struct SetFieldTypeArgs {
+    /// 项目目录
+    path: PathBuf,
+    /// 表名
+    #[arg(long)]
+    table: String,
+    /// 列名
+    #[arg(long)]
+    field: String,
+    /// 改成哪个值域：text / integer / number / bool / date / datetime / time
+    #[arg(long = "type", value_name = "TYPE")]
+    field_type: Option<String>,
+    /// 设为必填
+    #[arg(long, conflicts_with = "optional")]
+    required: bool,
+    /// 设为可选（取消必填）
+    #[arg(long)]
+    optional: bool,
+    /// 计量单位（给空串即清空）
+    #[arg(long)]
+    unit: Option<String>,
+    /// 建议范围（数值列）：如 `0,250`；`0,` 表示只设下限，`,250` 表示只设上限
+    #[arg(long, value_name = "MIN,MAX", conflicts_with = "clear_range")]
+    range: Option<String>,
+    /// 清掉建议范围
+    #[arg(long)]
+    clear_range: bool,
+    /// 允许值（分号分隔；给空串即清空）
+    #[arg(long)]
+    allowed_values: Option<String>,
+    /// 正则模式（text 列；整格匹配）
+    #[arg(long)]
+    pattern: Option<String>,
+    /// 小数位数（number 列；超出只提醒）
+    #[arg(long, conflicts_with = "clear_precision")]
+    precision: Option<u8>,
+    /// 清掉小数位数
+    #[arg(long)]
+    clear_precision: bool,
+    /// 引用 `表名.列名`（给空串即清空）
+    #[arg(long)]
+    reference: Option<String>,
+    /// 更新这一列的说明
+    #[arg(long)]
+    notes: Option<String>,
+    /// 只预览影响、不写模板
+    #[arg(long)]
+    dry_run: bool,
+    /// 明知会新增校验错误也照改（数据可以随后补）
+    #[arg(long)]
+    force: bool,
+    /// 写进变更流水的一句话（留空自动生成）
+    #[arg(long, default_value = "")]
+    summary: String,
 }
 
 #[derive(Args, Debug)]
@@ -205,6 +286,9 @@ struct AppendArgs {
     /// 允许写入表里还不存在的列（按这一行自动扩展表结构）
     #[arg(long)]
     allow_new_columns: bool,
+    /// 明知有类型错误也照写（默认拦下；数据可以随后补）
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args, Debug)]
@@ -228,6 +312,9 @@ struct AppendManyArgs {
     /// 允许写入模板未定义的列（默认拒绝）
     #[arg(long)]
     allow_new_columns: bool,
+    /// 明知有类型错误也照写（默认拦下；数据可以随后补）
+    #[arg(long)]
+    force: bool,
     /// 只校验不写入（试运行）
     #[arg(long)]
     dry_run: bool,
@@ -747,6 +834,272 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
             }
         }
 
+        Command::ValueTypes => {
+            let c = cercis_core::value::contract();
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "value_types": c,
+                }));
+            } else {
+                println!("值类型（内核唯一定义；插件与 AI 照用，不得自造）\n");
+                for d in &c.domains {
+                    println!(
+                        "  - {:<9} {:<6}｜违反时：{}",
+                        d.name,
+                        d.label_cn,
+                        severity_cn(d.severity_on_violation)
+                    );
+                    println!("      怎么写：{}", d.csv_form);
+                    if !d.examples_ok.is_empty() {
+                        println!("      合法例子：{}", d.examples_ok.join("、"));
+                    }
+                    if !d.examples_bad.is_empty() {
+                        println!("      必须报告：{}", d.examples_bad.join("、"));
+                    }
+                    if !d.inferable {
+                        println!("      注：只校验、不参与类型推断");
+                    }
+                }
+                println!("\n约束（与类型正交，可组合）");
+                for k in &c.constraints {
+                    println!(
+                        "  - {:<15} {:<6}｜适用于 {}｜{}",
+                        k.name,
+                        k.label_cn,
+                        k.applies_to,
+                        severity_cn(k.severity)
+                    );
+                    println!("      {}", k.notes);
+                }
+                println!("\n{}", c.missing_value_rule);
+                println!("\n校验时点：");
+                for p in &c.validation_points {
+                    println!("  - {p}");
+                }
+                println!("\n{}", c.severity_policy);
+            }
+        }
+
+        Command::InferTypes(a) => {
+            let p = Project::open(&a.path, None)?;
+            let template = p.template()?;
+            let tables: Vec<String> = match &a.table {
+                Some(t) => vec![t.clone()],
+                None => template.tables.iter().map(|t| t.name.clone()).collect(),
+            };
+            let mut columns: Vec<cercis_core::infer::ColumnInference> = Vec::new();
+            let mut scanned_tables: Vec<String> = Vec::new();
+            for name in &tables {
+                let path = p.root().join("tables").join(format!("{name}.csv"));
+                if !path.exists() {
+                    continue;
+                }
+                let table = p.store.load_table_with_template(name, &template)?;
+                let declared: Vec<(String, String)> = template
+                    .table(name)
+                    .map(|td| {
+                        td.fields
+                            .iter()
+                            .map(|f| (f.name.clone(), f.field_type.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut found = cercis_core::infer::infer_table(&table, &declared);
+                for c in found.iter_mut() {
+                    c.table = name.clone();
+                }
+                columns.extend(found);
+                scanned_tables.push(name.clone());
+            }
+            if let Some(only) = &a.column {
+                columns.retain(|c| &c.column == only);
+            }
+            if a.only_change {
+                columns.retain(|c| c.suggest_change);
+            }
+
+            let suggest_count = columns.iter().filter(|c| c.suggest_change).count();
+            let declared_bad = columns.iter().filter(|c| c.declared_violations > 0).count();
+
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "threshold": a.min_confidence,
+                    "tables_scanned": scanned_tables,
+                    "columns": columns,
+                    "summary": {
+                        "columns": columns.len(),
+                        "suggest_change": suggest_count,
+                        "columns_with_violations": declared_bad,
+                    },
+                }));
+            } else if columns.is_empty() {
+                println!("没有可推断的列（表不存在，或没有数据）。");
+            } else {
+                for c in &columns {
+                    let s = &c.profile.stats;
+                    let head = format!("{}.{}（声明 {}）", c.table, c.column, c.declared_type);
+                    match &c.profile.recommended {
+                        Some(r) if c.suggest_change => {
+                            println!("{head} → 建议改成 {r}（{}）", confidence_text(&c.profile));
+                        }
+                        Some(r) => {
+                            println!("{head} → 与建议一致（{r}，{}）", confidence_text(&c.profile));
+                        }
+                        None => {
+                            println!("{head} → 无强建议（{}）", confidence_text(&c.profile));
+                        }
+                    }
+                    println!(
+                        "    非空 {}／共 {} 格（空 {}，占位符写法 {}）",
+                        s.non_empty, s.total, s.empty, s.missing_markers
+                    );
+                    if c.declared_violations > 0 {
+                        println!(
+                            "    ⚠ 有 {} 格不符合声明的 {} 类型：{}",
+                            c.declared_violations,
+                            c.declared_type,
+                            c.declared_counterexamples.join("、")
+                        );
+                    }
+                    let counter: Vec<String> = c
+                        .profile
+                        .candidates
+                        .iter()
+                        .filter(|cand| !cand.counterexamples.is_empty())
+                        .take(1)
+                        .flat_map(|cand| {
+                            cand.counterexamples
+                                .iter()
+                                .map(|v| format!("{v}（不符 {}）", cand.domain))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+                    if !counter.is_empty() && c.suggest_change {
+                        println!("    反例：{}", counter.join("、"));
+                    }
+                    for n in &c.profile.notes {
+                        println!("    注：{n}");
+                    }
+                }
+                println!(
+                    "\n共 {} 列（表格 {}）：{} 列建议改类型，{} 列有不符合当前类型的格子。",
+                    columns.len(),
+                    scanned_tables.join("、"),
+                    suggest_count,
+                    declared_bad
+                );
+                println!("提示：这只是建议，不会自动改模板；确认后用 set-field-type 改（先加 --dry-run 看影响）。");
+            }
+        }
+
+        Command::SetFieldType(a) => {
+            let p = Project::open(&a.path, None)?;
+            let patch = build_field_patch(a)?;
+            if patch.is_empty() {
+                return Err(CercisError::Invalid(
+                    "没有要改的内容（至少给一项：--type / --required / --optional / --range / --pattern / --precision / --allowed-values / --reference / --unit / --notes）"
+                        .into(),
+                ));
+            }
+            let current = p.template()?;
+            let next = current.with_field_patch(&a.table, &a.field, &patch)?;
+
+            // 影响预览：拿新模板去校验现有数据，只算"这一次改动**新增**的问题"
+            let before = p.validate()?;
+            let after = p.validate_with(&next)?;
+            let mut new_errors: Vec<&cercis_core::Issue> = Vec::new();
+            let mut new_warnings: Vec<&cercis_core::Issue> = Vec::new();
+            for issue in after.errors.iter() {
+                if !before.errors.iter().any(|b| same_issue(b, issue)) {
+                    new_errors.push(issue);
+                }
+            }
+            for issue in after.warnings.iter() {
+                if !before.warnings.iter().any(|b| same_issue(b, issue)) {
+                    new_warnings.push(issue);
+                }
+            }
+
+            let describe = patch.describe();
+            if !new_errors.is_empty() && !a.force {
+                let mut msg = format!(
+                    "这次改动会让 {} 处格子不符合校验（示例：{}）",
+                    new_errors.len(),
+                    new_errors
+                        .iter()
+                        .take(3)
+                        .map(|e| format!("{}:{} {}.{}", e.table, e.row, e.field, e.message))
+                        .collect::<Vec<_>>()
+                        .join("；")
+                );
+                msg.push_str("。已存在的原值不会被改动：直接写会留下这些错误，体检会报出来。确认要改就加 --force（数据随后补），或先清理数据。");
+                return Err(CercisError::Invalid(msg));
+            }
+
+            if a.dry_run {
+                if cli.json {
+                    print_json(&serde_json::json!({
+                        "schema": "cercis.cli/1",
+                        "ok": true,
+                        "dry_run": true,
+                        "table": a.table,
+                        "field": a.field,
+                        "change": describe,
+                        "new_errors": new_errors.len(),
+                        "new_warnings": new_warnings.len(),
+                        "errors": new_errors,
+                        "warnings": new_warnings,
+                    }));
+                } else {
+                    println!("试运行：{}.{} 将改为 {}", a.table, a.field, describe);
+                    println!(
+                        "影响：新增错误 {} 处，新增提醒 {} 处（未写模板）",
+                        new_errors.len(),
+                        new_warnings.len()
+                    );
+                    for e in new_errors.iter().take(5) {
+                        println!("  错误 {}:{} {}：{}", e.table, e.row, e.field, e.message);
+                    }
+                    for w in new_warnings.iter().take(5) {
+                        println!("  提醒 {}:{} {}：{}", w.table, w.row, w.field, w.message);
+                    }
+                    println!("（去掉 --dry-run 即正式写入模板；数据文件不会被改动）");
+                }
+                return Ok(());
+            }
+
+            let (_, describe) = p.apply_field_patch(&a.table, &a.field, &patch, &a.summary)?;
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "dry_run": false,
+                    "table": a.table,
+                    "field": a.field,
+                    "change": describe,
+                    "new_errors": new_errors.len(),
+                    "new_warnings": new_warnings.len(),
+                }));
+            } else {
+                println!(
+                    "已修改模板：{}.{}（{}）",
+                    a.table, a.field, describe
+                );
+                println!(
+                    "数据文件未改动；新增错误 {} 处、新增提醒 {} 处（cercis validate 可复核）",
+                    new_errors.len(),
+                    new_warnings.len()
+                );
+                if !a.summary.is_empty() {
+                    println!("说明：{}", a.summary);
+                }
+            }
+        }
+
         Command::Version => {
             if cli.json {
                 print_json(&serde_json::json!({
@@ -838,6 +1191,24 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
             if row.is_empty() {
                 return Err(CercisError::Invalid("至少提供一个 --set col=value".into()));
             }
+            // 写入前的那道校验（§5.9.3）：结构错误拦下，提醒放行
+            let template = p.template()?;
+            let (errors, warnings) = check_cells_against_template(&template, &a.table, &[row.clone()]);
+            if !errors.is_empty() && !a.force {
+                return Err(CercisError::Invalid(format!(
+                    "{} 处格子不符合模板的类型规则（{}）。要么改值，要么加 --force 照写（会留下已知错误）",
+                    errors.len(),
+                    errors
+                        .iter()
+                        .take(3)
+                        .map(|e| format!("{}：{}", e.field, e.message))
+                        .collect::<Vec<_>>()
+                        .join("；")
+                )));
+            }
+            for w in warnings.iter().take(3) {
+                eprintln!("提醒 [{}] {}：{}", w.row, w.field, w.message);
+            }
             // 若表不存在，按本次提供的列创建（列名按字母序稳定）
             let owned: Vec<String> = row.keys().cloned().collect();
             let cols: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
@@ -907,6 +1278,10 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                 a.summary.clone()
             };
 
+            // 写入前的类型校验（§5.9.3 的第一个时点）：结构错误整批拦下，提醒放行。
+            let (cell_errors, cell_warnings) =
+                check_cells_against_template(&template, &a.table, &rows);
+
             if a.dry_run {
                 if cli.json {
                     print_json(&serde_json::json!({
@@ -916,6 +1291,8 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                         "table": a.table,
                         "rows": rows.len(),
                         "columns": columns,
+                        "errors": cell_errors,
+                        "warnings": cell_warnings,
                         "sample": rows.iter().take(3).collect::<Vec<_>>(),
                     }));
                 } else {
@@ -929,9 +1306,36 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                             .join("  ");
                         println!("  {line}");
                     }
+                    if cell_errors.is_empty() {
+                        println!("校验：没有结构错误（{} 处提醒）", cell_warnings.len());
+                    } else {
+                        println!("校验：{} 处错误（这些会让整批写不进去）", cell_errors.len());
+                        for e in cell_errors.iter().take(8) {
+                            println!("  错误 第 {} 行 {}：{}", e.row, e.field, e.message);
+                        }
+                        if cell_errors.len() > 8 {
+                            println!("  ……还有 {} 处", cell_errors.len() - 8);
+                        }
+                    }
+                    for w in cell_warnings.iter().take(8) {
+                        println!("  提醒 第 {} 行 {}：{}", w.row, w.field, w.message);
+                    }
                     println!("（未写入任何数据；去掉 --dry-run 即正式导入）");
                 }
                 return Ok(());
+            }
+
+            if !cell_errors.is_empty() && !a.force {
+                return Err(CercisError::Invalid(format!(
+                    "有 {} 处格子不符合模板的类型规则，整批未写入（先加 --dry-run 看清单；要照写加 --force）。示例：{}",
+                    cell_errors.len(),
+                    cell_errors
+                        .iter()
+                        .take(3)
+                        .map(|e| format!("第 {} 行 {}：{}", e.row, e.field, e.message))
+                        .collect::<Vec<_>>()
+                        .join("；")
+                )));
             }
 
             let refs: Vec<&str> = columns.iter().map(|s| s.as_str()).collect();
@@ -1072,6 +1476,130 @@ fn print_json(v: &serde_json::Value) {
         "{}",
         serde_json::to_string_pretty(v).unwrap_or_else(|_| "{}".into())
     );
+}
+
+/// 强度写成中文（值类型清单用）。
+fn severity_cn(severity: &str) -> &'static str {
+    match severity {
+        "error" => "错误（阻止写入）",
+        "warning" => "提醒（放行）",
+        _ => "不校验",
+    }
+}
+
+/// 置信度写成"最高匹配 integer 99%（99/100 格）"这样。
+fn confidence_text(profile: &cercis_core::infer::Profile) -> String {
+    let best = profile
+        .candidates
+        .iter()
+        .filter(|c| c.domain != "text")
+        .max_by(|a, b| {
+            a.confidence
+                .partial_cmp(&b.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    match best {
+        Some(c) => format!(
+            "最高匹配 {} {:.0}%（{}/{} 格）",
+            c.domain,
+            c.confidence * 100.0,
+            c.matched,
+            profile.stats.non_empty
+        ),
+        None => "没有候选类型".into(),
+    }
+}
+
+/// 把 `--type/--range/...` 组装成字段补丁。
+fn build_field_patch(
+    a: &SetFieldTypeArgs,
+) -> Result<cercis_core::template::FieldPatch, CercisError> {
+    let range = match &a.range {
+        None => None,
+        Some(spec) => {
+            let (lo, hi) = spec.split_once(',').ok_or_else(|| {
+                CercisError::Invalid(format!(
+                    "范围要写成 `最小值,最大值`（可留空一端，如 `0,` 或 `,250`）：{spec}"
+                ))
+            })?;
+            let parse = |s: &str| -> Result<Option<f64>, CercisError> {
+                let s = s.trim();
+                if s.is_empty() {
+                    return Ok(None);
+                }
+                s.parse::<f64>()
+                    .map(Some)
+                    .map_err(|_| CercisError::Invalid(format!("范围里的数读不出来：{s}")))
+            };
+            Some(vec![parse(lo)?, parse(hi)?])
+        }
+    };
+    Ok(cercis_core::template::FieldPatch {
+        field_type: a.field_type.clone(),
+        required: if a.required {
+            Some(true)
+        } else if a.optional {
+            Some(false)
+        } else {
+            None
+        },
+        unit: a.unit.clone(),
+        range,
+        clear_range: a.clear_range,
+        allowed_values: a.allowed_values.clone(),
+        pattern: a.pattern.clone(),
+        precision: a.precision,
+        clear_precision: a.clear_precision,
+        reference: a.reference.clone(),
+        notes: a.notes.clone(),
+    })
+}
+
+/// 两条校验结论是不是同一条（用于算"这次改动新增了哪些问题"）。
+fn same_issue(a: &cercis_core::Issue, b: &cercis_core::Issue) -> bool {
+    a.kind == b.kind
+        && a.table == b.table
+        && a.row == b.row
+        && a.field == b.field
+        && a.message == b.message
+}
+
+/// 用内核的类型规则检查一批**即将写入**的行（§5.9.3 的第一个校验时点：写入前）。
+///
+/// 只检查模板里声明过的列：模板之外的列（`--allow-new-columns`）没有类型可依据，
+/// 直接跳过——**放行不猜**。
+fn check_cells_against_template(
+    template: &cercis_core::Template,
+    table: &str,
+    rows: &[Row],
+) -> (Vec<cercis_core::Issue>, Vec<cercis_core::Issue>) {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let Some(td) = template.table(table) else {
+        return (errors, warnings);
+    };
+    for (i, row) in rows.iter().enumerate() {
+        for f in &td.fields {
+            let Some(cell) = row.get(&f.name) else {
+                continue;
+            };
+            for finding in cercis_core::value::check_value(f.domain(), &f.constraints(), cell) {
+                let issue = cercis_core::Issue {
+                    level: finding.severity.as_str().to_string(),
+                    kind: finding.kind.to_string(),
+                    table: table.to_string(),
+                    row: i + 1,
+                    field: f.name.clone(),
+                    message: finding.message,
+                };
+                match finding.severity {
+                    cercis_core::Severity::Error => errors.push(issue),
+                    cercis_core::Severity::Warning => warnings.push(issue),
+                }
+            }
+        }
+    }
+    (errors, warnings)
 }
 
 /// AI 宿主的技能目录（技能包要装到这里才会被自动加载）。

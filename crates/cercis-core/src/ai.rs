@@ -60,6 +60,12 @@ pub struct ContractColumn {
     pub reference: String,
     #[serde(default)]
     pub allowed_values: String,
+    /// 正则模式（text 专用；整格匹配）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pattern: String,
+    /// 小数位数（number 专用；超出只提醒）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,12 +95,17 @@ impl AiContract {
                         required: f.required,
                         reference: f.reference.clone().unwrap_or_default(),
                         allowed_values: f.allowed_values.clone(),
+                        pattern: f.pattern.clone(),
+                        precision: f.precision,
                     })
                     .collect(),
             })
             .collect();
 
         let commands = vec![
+            cmd("cercis value-types", "查看七种值类型与六种约束（唯一权威；插件与 AI 照用，不得自造类型）", "cercis value-types --json"),
+            cmd("cercis infer-types <项目>", "看某列该用什么类型（候选 + 置信度 + 反例；≥95% 才给强建议）", "cercis infer-types ./项目 --table records --json"),
+            cmd("cercis set-field-type <项目> --table <表> --field <列> --type <类型>", "改模板里的列类型/约束（写入：先试运行，会拦下会新增错误的改动）", "cercis set-field-type ./项目 --table records --field value_num --type number --precision 2 --dry-run"),
             cmd("cercis template <项目>", "查看表结构与字段定义", "cercis template ./项目 --table observations"),
             cmd("cercis query <项目> --table <表> --filter <列> <运算符> <值>", "组合筛选查询", "cercis query ./项目 --table observations --filter trait_id eq length_mm --sort value_num:desc --json"),
             cmd("cercis validate <项目>", "校验引用完整性与字段规则", "cercis validate ./项目 --json"),
@@ -121,6 +132,8 @@ impl AiContract {
                 "写入必须通过 cercis 命令（内核通道），不得直接编辑 CSV".into(),
                 "更正不覆盖原值：原值由 history/objects/ 永久保留".into(),
                 "缺失值留空单元格，不要写 NA / - / 0 代替".into(),
+                "类型由内核统一定义（七种值域 + 六种约束）：照 `cercis value-types --json` 用，不要自造类型".into(),
+                "改类型只改模板、不动数据；改动前先 `cercis infer-types` 看建议与反例，再 `set-field-type --dry-run` 看影响".into(),
                 "统计、建模与绘图交给 R/Python/SPSS；本工具只做数据整理与导出".into(),
                 "涉及真实数据的操作前，先确认用户意图".into(),
             ],

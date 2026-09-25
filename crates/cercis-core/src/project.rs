@@ -236,6 +236,46 @@ impl Project {
         validate_project(&self.store, &t)
     }
 
+    /// 按**指定的**模板做整体校验（不改项目文件）。
+    ///
+    /// 用途：`set-field-type` 这类"先看看改了会怎么样"的场景——拿一份还没落盘的
+    /// 新模板去校验现有数据，就能预测出"这一改会新增几处错误、在哪几行"。
+    pub fn validate_with(&self, t: &Template) -> Result<Report> {
+        validate_project(&self.store, t)
+    }
+
+    /// 改模板里的一个字段（**写入**：保存模板并留痕）。
+    ///
+    /// 改类型不会动任何数据文件——类型只存在于模板里。返回新模板与变更摘要。
+    pub fn apply_field_patch(
+        &self,
+        table: &str,
+        field: &str,
+        patch: &crate::template::FieldPatch,
+        note: &str,
+    ) -> Result<(Template, String)> {
+        let current = self.template()?;
+        let next = current.with_field_patch(table, field, patch)?;
+        self.store.save_template(&next)?;
+        let describe = patch.describe();
+        let extra = if note.trim().is_empty() {
+            String::new()
+        } else {
+            format!("；说明：{}", note.trim())
+        };
+        self.store.append_change(&crate::history::ChangeEntry::new(
+            &self.store.identity.user_id,
+            &self.store.identity.device_for_log(),
+            "update",
+            "template",
+            &format!("{table}.{field}"),
+            &format!("修改字段 {table}.{field}：{describe}{extra}（数据文件未改动）"),
+            "",
+            "",
+        ))?;
+        Ok((next, describe))
+    }
+
     /// 创建检查点（文件级备份）。
     pub fn checkpoint(&self, note: &str) -> Result<PathBuf> {
         let mut files = Vec::new();

@@ -17,3 +17,4 @@ ulid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 unicode-normalization = { workspace = true }
+regex = "1.13.1"

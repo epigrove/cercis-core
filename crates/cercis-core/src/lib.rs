@@ -40,6 +40,7 @@ pub mod error;
 pub mod format;
 pub mod history;
 pub mod ids;
+pub mod infer;
 pub mod manifest;
 pub mod plugin;
 pub mod project;
@@ -50,6 +51,7 @@ pub mod template;
 pub mod terms;
 pub mod tx;
 pub mod validate;
+pub mod value;
 
 /// 内核版本（来自 Cargo.toml）。
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -68,3 +70,4 @@ pub use table::Table;
 pub use terms::Terms;
 pub use template::Template;
 pub use validate::{validate_project, Issue, Report};
+pub use value::{Severity, ValueDomain};

@@ -10,10 +10,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::format;
 use crate::store::Store;
 use crate::table::Table;
 use crate::template::{FieldDef, Template};
+use crate::value::{self, Severity};
 use crate::{CercisError, Result};
 
 /// 单条问题。
@@ -21,6 +21,10 @@ use crate::{CercisError, Result};
 pub struct Issue {
     /// 级别：error / warning
     pub level: String,
+    /// 触发的规则代号（required / type / range / allowed_values / pattern /
+    /// precision / reference / primary_key / missing_marker / nfc / template）
+    #[serde(default)]
+    pub kind: String,
     /// 表名
     pub table: String,
     /// 行号（1 起，含表头时为表内物理行号）
@@ -46,6 +50,7 @@ impl Report {
     pub fn push_error(&mut self, table: &str, row: usize, field: &str, message: String) {
         self.errors.push(Issue {
             level: "error".into(),
+            kind: String::new(),
             table: table.into(),
             row,
             field: field.into(),
@@ -56,11 +61,28 @@ impl Report {
     pub fn push_warning(&mut self, table: &str, row: usize, field: &str, message: String) {
         self.warnings.push(Issue {
             level: "warning".into(),
+            kind: String::new(),
             table: table.into(),
             row,
             field: field.into(),
             message,
         });
+    }
+
+    /// 带规则代号的写入（校验结论用；代号便于插件与 AI 分类处理）。
+    pub fn push_finding(&mut self, table: &str, row: usize, field: &str, kind: &str, message: String, severity: Severity) {
+        let issue = Issue {
+            level: severity.as_str().into(),
+            kind: kind.into(),
+            table: table.into(),
+            row,
+            field: field.into(),
+            message,
+        };
+        match severity {
+            Severity::Error => self.errors.push(issue),
+            Severity::Warning => self.warnings.push(issue),
+        }
     }
 }
 
@@ -103,21 +125,25 @@ impl Report {
     fn check_template_columns(&mut self, t: &crate::template::TableDef, table: &Table) {
         for col in &table.columns {
             if t.fields.iter().all(|f| f.name != *col) {
-                self.push_warning(
+                self.push_finding(
                     &t.name,
                     0,
                     col,
+                    "template",
                     format!("列 {col} 不在模板定义中（可能由插件扩展加入）"),
+                    Severity::Warning,
                 );
             }
         }
         for f in &t.fields {
             if !table.columns.contains(&f.name) {
-                self.push_error(
+                self.push_finding(
                     &t.name,
                     0,
                     &f.name,
+                    "template",
                     format!("模板要求的列 {} 在表中缺失", f.name),
+                    Severity::Error,
                 );
             }
         }
@@ -137,15 +163,24 @@ fn validate_table(
         for (i, row) in table.rows.iter().enumerate() {
             let key = row.get(&t.primary_key).cloned().unwrap_or_default();
             if key.trim().is_empty() {
-                report.push_error(&t.name, i + 2, &t.primary_key, "主键不能为空".into());
-                continue;
-            }
-            if let Some(prev) = seen.insert(key.clone(), i + 2) {
-                report.push_error(
+                report.push_finding(
                     &t.name,
                     i + 2,
                     &t.primary_key,
+                    "primary_key",
+                    "主键不能为空".into(),
+                    Severity::Error,
+                );
+                continue;
+            }
+            if let Some(prev) = seen.insert(key.clone(), i + 2) {
+                report.push_finding(
+                    &t.name,
+                    i + 2,
+                    &t.primary_key,
+                    "primary_key",
                     format!("主键 {key} 重复（首次出现在第 {prev} 行）"),
+                    Severity::Error,
                 );
             }
         }
@@ -177,11 +212,13 @@ fn validate_table(
                     .iter()
                     .any(|r| r.get(rf).map(|v| v.as_str()) == Some(cell.as_str()));
                 if !found {
-                    report.push_error(
+                    report.push_finding(
                         &t.name,
                         lineno,
                         &f.name,
+                        "reference",
                         format!("引用不存在：{reference} 中没有 {cell}"),
+                        Severity::Error,
                     );
                 }
             }
@@ -198,116 +235,16 @@ fn validate_cell(
     lineno: usize,
     report: &mut Report,
 ) {
-    let empty = cell.trim().is_empty();
-
-    if empty {
-        if f.required {
-            report.push_error(&t.name, lineno, &f.name, "必填项为空".into());
-        }
-        return;
-    }
-
-    if format::is_missing_marker(cell) {
-        report.push_warning(
+    // **唯一实现**在 value.rs：体检、写入前检查、导出前清单共用它（§5.9 / D36）。
+    for finding in value::check_value(f.domain(), &f.constraints(), cell) {
+        report.push_finding(
             &t.name,
             lineno,
             &f.name,
-            format!("疑似把缺失写成 {:?}；建议留空单元格", cell),
+            finding.kind,
+            finding.message,
+            finding.severity,
         );
-    }
-
-    match f.field_type.as_str() {
-        "number" => {
-            if !format::is_canonical_number(cell) {
-                report.push_error(
-                    &t.name,
-                    lineno,
-                    &f.name,
-                    format!("不是规范数字写法: {cell:?}"),
-                );
-                return;
-            }
-            if let Some(range) = &f.range {
-                if let Ok(v) = cell.trim().parse::<f64>() {
-                    if let Some(Some(min)) = range.first() {
-                        if v < *min {
-                            report.push_warning(
-                                &t.name,
-                                lineno,
-                                &f.name,
-                                format!("小于建议下限 {min}（实际 {v}）"),
-                            );
-                        }
-                    }
-                    if let Some(Some(max)) = range.get(1) {
-                        if v > *max {
-                            report.push_warning(
-                                &t.name,
-                                lineno,
-                                &f.name,
-                                format!("大于建议上限 {max}（实际 {v}）"),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        "integer" => {
-            if cell.trim().parse::<i64>().is_err() {
-                report.push_error(&t.name, lineno, &f.name, format!("不是整数: {cell:?}"));
-            }
-        }
-        "date" => {
-            if !format::is_iso_date(cell.trim()) {
-                report.push_error(
-                    &t.name,
-                    lineno,
-                    &f.name,
-                    format!("不是 ISO 日期（YYYY-MM-DD）: {cell:?}"),
-                );
-            }
-        }
-        "datetime" => {
-            if crate::ids::parse_iso8601(cell.trim()).is_err() {
-                report.push_warning(
-                    &t.name,
-                    lineno,
-                    &f.name,
-                    format!("不是带时区的 ISO 时间: {cell:?}"),
-                );
-            }
-        }
-        "bool" if !matches!(cell.trim(), "是" | "否" | "true" | "false") => {
-            report.push_warning(
-                &t.name,
-                lineno,
-                &f.name,
-                format!("布尔值建议使用 是/否: {cell:?}"),
-            );
-        }
-        _ => {}
-    }
-
-    // 允许值
-    if !f.allowed_values.is_empty() {
-        let allowed: Vec<&str> = f
-            .allowed_values
-            .split(';')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !allowed.is_empty() && !allowed.contains(&cell.trim()) {
-            report.push_warning(
-                &t.name,
-                lineno,
-                &f.name,
-                format!("取值 {cell:?} 不在允许值列表（{}）中", allowed.join("; ")),
-            );
-        }
-    }
-
-    if !format::is_nfc(cell) {
-        report.push_warning(&t.name, lineno, &f.name, "未做 Unicode NFC 归一化".into());
     }
 }
 
@@ -501,8 +438,9 @@ mod tests {
             report
                 .errors
                 .iter()
-                .any(|e| e.field == "value_num" && e.message.contains("不是规范数字")),
-            "应报告数字格式错误"
+                .any(|e| e.field == "value_num" && e.kind == "type"),
+            "应报告数字格式错误（kind=type）: {:?}",
+            report.errors
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
