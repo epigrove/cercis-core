@@ -415,7 +415,20 @@ impl Template {
                             allowed_values: String::new(),
                             notes: String::new(),
                         },
-                        field("parent_sample_id", "父样本", "Parent sample", "text", false),
+                        // F-02（S6 验收发现）：父样本也是样本，必须声明引用，
+                        // 否则"子样本指向一个不存在的父样本"检不出来
+                        FieldDef {
+                            name: "parent_sample_id".into(),
+                            label_cn: "父样本".into(),
+                            label_en: "Parent sample".into(),
+                            field_type: "text".into(),
+                            unit: String::new(),
+                            required: false,
+                            range: None,
+                            reference: Some("samples.sample_id".into()),
+                            allowed_values: String::new(),
+                            notes: String::new(),
+                        },
                         field("sample_type", "样本类型", "Sample type", "text", false),
                         field("notes", "备注", "Notes", "text", false),
                     ],

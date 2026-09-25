@@ -47,6 +47,7 @@ pub mod query;
 pub mod store;
 pub mod table;
 pub mod template;
+pub mod terms;
 pub mod tx;
 pub mod validate;
 
@@ -64,5 +65,6 @@ pub use project::Project;
 pub use query::{Condition, Op, Query, SortDir, SortKey};
 pub use store::{AppendOutcome, Identity, Store};
 pub use table::Table;
+pub use terms::Terms;
 pub use template::Template;
 pub use validate::{validate_project, Issue, Report};

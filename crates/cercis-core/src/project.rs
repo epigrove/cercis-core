@@ -156,6 +156,43 @@ impl Project {
         }
     }
 
+    /// 载入模板，并**把术语包应用到标签上**（数据与列名不受影响）。
+    ///
+    /// 界面、说明书、AI 材料都该用这一版；要"原样的模板"用 [`Project::template`]。
+    pub fn template_with_terms(&self) -> Result<(Template, Option<crate::Terms>)> {
+        let mut t = self.template()?;
+        let terms = crate::Terms::load(self.root())?;
+        if let Some(pack) = &terms {
+            pack.apply_to(&mut t);
+        }
+        Ok((t, terms))
+    }
+
+    /// 当前生效的术语包（没装过就是 None）。
+    pub fn terms(&self) -> Result<Option<crate::Terms>> {
+        crate::Terms::load(self.root())
+    }
+
+    /// 安装/替换术语包：写 `<项目>/terms.yaml`，**不动任何数据**。
+    pub fn install_terms(&self, terms: &crate::Terms) -> Result<()> {
+        terms.save(self.root())?;
+        self.store.append_change(&crate::history::ChangeEntry::new(
+            &self.store.identity.user_id,
+            &self.store.identity.device_for_log(),
+            "update",
+            "terms",
+            &terms.profile,
+            &format!(
+                "切换术语包：{}（覆盖 {} 处标签，数据未改动）",
+                terms.profile,
+                terms.override_count()
+            ),
+            "",
+            "",
+        ))?;
+        Ok(())
+    }
+
     /// 装入模板：保存到项目并建表（已有的表与数据不动）。
     ///
     /// 返回新建的表名列表。

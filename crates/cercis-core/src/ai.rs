@@ -411,10 +411,14 @@ pub fn refresh_all(root: impl AsRef<Path>) -> Result<Manifest> {
     let manifest = Manifest::generate(root)?;
     manifest.write(root)?;
 
-    let template = match tx::read_optional(&root.join("template.yaml"))? {
+    let mut template = match tx::read_optional(&root.join("template.yaml"))? {
         Some(t) => Template::from_yaml(&t)?,
         None => Template::generic(),
     };
+    // 术语包只改标签：AI 材料与契约显示领域用词（小区/处理），列名仍是 unit_id/treatment_id
+    if let Some(terms) = crate::Terms::load(root)? {
+        terms.apply_to(&mut template);
+    }
 
     let contract = AiContract::build(&template, &manifest);
     contract.write(root)?;

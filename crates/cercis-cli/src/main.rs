@@ -57,6 +57,8 @@ enum Command {
     Template(TemplateArgs),
     /// 装入模板（示例研究 / 通用）
     InstallTemplate(InstallTemplateArgs),
+    /// 查看或切换术语包（只改显示名，不动数据）
+    Terms(TermsArgs),
     /// 按条件查询某张表（组合筛选 + 排序）
     Query(QueryArgs),
     /// 校验项目（引用完整性 + 字段规则）
@@ -81,14 +83,29 @@ struct TemplateArgs {
     /// 只显示某张表
     #[arg(long)]
     table: Option<String>,
+    /// 显示**未经术语包覆盖**的原始模板
+    #[arg(long)]
+    raw: bool,
 }
 
 #[derive(Args, Debug)]
 struct InstallTemplateArgs {
     path: PathBuf,
     /// 模板名：generic / example-study
-    #[arg(long)]
-    name: String,
+    #[arg(long, conflicts_with = "file")]
+    name: Option<String>,
+    /// 从模板文件装入（科研工具包提供的模板走这条路）
+    #[arg(long, value_name = "FILE")]
+    file: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct TermsArgs {
+    /// 项目目录
+    path: PathBuf,
+    /// 装入术语包文件（写入 <项目>/terms.yaml；不动数据）
+    #[arg(long, value_name = "FILE")]
+    file: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -308,15 +325,35 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
     match &cli.command {
         Command::Template(a) => {
             let p = Project::open(&a.path, None)?;
-            let t = p.template()?;
+            // 默认显示"术语包生效后"的标签；--raw 看原始模板
+            let (t, terms) = if a.raw {
+                (p.template()?, None)
+            } else {
+                p.template_with_terms()?
+            };
+            let profile = terms
+                .as_ref()
+                .map(|x| x.profile.clone())
+                .unwrap_or_else(|| t.terms_profile.clone());
             if cli.json {
                 print_json(&serde_json::json!({
                     "schema": "cercis.cli/1",
                     "ok": true,
+                    "terms_profile": profile,
+                    "terms_applied": terms.is_some(),
+                    "terms_overrides": terms.as_ref().map(|x| x.override_count()).unwrap_or(0),
                     "template": t,
                 }));
             } else {
                 println!("模板：{}（{}）", t.name, t.label_cn);
+                if let Some(pack) = &terms {
+                    println!(
+                        "术语包：{}（{}，覆盖 {} 处标签；列名不变）",
+                        pack.profile,
+                        pack.label_cn,
+                        pack.override_count()
+                    );
+                }
                 for td in &t.tables {
                     if let Some(only) = &a.table {
                         if only != &td.name {
@@ -361,13 +398,28 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
 
         Command::InstallTemplate(a) => {
             let p = Project::open(&a.path, None)?;
-            let t = match a.name.as_str() {
-                "generic" => cercis_core::Template::generic(),
-                "example-study" => cercis_core::Template::example_study(),
-                other => {
-                    return Err(CercisError::Invalid(format!(
-                        "未知模板 {other}（可用：generic / example-study）"
-                    )))
+            let t = match (&a.file, &a.name) {
+                // 从文件装入：科研工具包等外部提供模板走这条通道
+                // （内核保持行业普适——它不认识"科研"，只认识"模板文件"）
+                (Some(file), _) => {
+                    let text = std::fs::read_to_string(file).map_err(|e| {
+                        CercisError::NotFound(format!("读不到模板文件 {}：{e}", file.display()))
+                    })?;
+                    cercis_core::Template::from_yaml(&text)?
+                }
+                (None, Some(name)) => match name.as_str() {
+                    "generic" => cercis_core::Template::generic(),
+                    "example-study" => cercis_core::Template::example_study(),
+                    other => {
+                        return Err(CercisError::Invalid(format!(
+                            "未知模板 {other}（可用：generic / example-study，或用 --file 指定模板文件）"
+                        )))
+                    }
+                },
+                (None, None) => {
+                    return Err(CercisError::Invalid(
+                        "请给 --name <模板名> 或 --file <模板文件>".into(),
+                    ))
                 }
             };
             let created = p.install_template(&t)?;
@@ -380,10 +432,75 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                 }));
             } else {
                 println!("已装入模板：{}", t.name);
+                if let Some(f) = &a.file {
+                    println!("来源：{}", f.display());
+                }
                 if created.is_empty() {
                     println!("（表已存在，未新建）");
                 } else {
                     println!("新建表：{}", created.join(", "));
+                }
+            }
+        }
+
+        Command::Terms(a) => {
+            let p = Project::open(&a.path, None)?;
+            if let Some(file) = &a.file {
+                let text = std::fs::read_to_string(file).map_err(|e| {
+                    CercisError::NotFound(format!("读不到术语包 {}：{e}", file.display()))
+                })?;
+                let terms = cercis_core::Terms::from_yaml(&text)?;
+                p.install_terms(&terms)?;
+                if cli.json {
+                    print_json(&serde_json::json!({
+                        "schema": "cercis.cli/1",
+                        "ok": true,
+                        "profile": terms.profile,
+                        "label_cn": terms.label_cn,
+                        "overrides": terms.override_count(),
+                        "source": file.display().to_string(),
+                    }));
+                } else {
+                    println!(
+                        "已切换术语包：{}（{}）——覆盖 {} 处标签，**数据文件未改动**",
+                        terms.profile,
+                        terms.label_cn,
+                        terms.override_count()
+                    );
+                }
+                return Ok(());
+            }
+
+            match p.terms()? {
+                Some(t) => {
+                    if cli.json {
+                        print_json(&serde_json::json!({
+                            "schema": "cercis.cli/1",
+                            "ok": true,
+                            "profile": t.profile,
+                            "label_cn": t.label_cn,
+                            "overrides": t.override_count(),
+                        }));
+                    } else {
+                        println!(
+                            "当前术语包：{}（{}）｜覆盖 {} 处标签",
+                            t.profile,
+                            t.label_cn,
+                            t.override_count()
+                        );
+                    }
+                }
+                None => {
+                    if cli.json {
+                        print_json(&serde_json::json!({
+                            "schema": "cercis.cli/1",
+                            "ok": true,
+                            "profile": "（未装术语包）",
+                        }));
+                    } else {
+                        println!("未装术语包：界面按模板原本的中英文标签显示。");
+                        println!("装入方式：cercis terms <项目> --file <术语包.yaml>");
+                    }
                 }
             }
         }
