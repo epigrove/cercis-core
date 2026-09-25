@@ -116,8 +116,12 @@ struct TermsArgs {
 
 #[derive(Args, Debug)]
 struct InferTypesArgs {
-    /// 项目目录
-    path: PathBuf,
+    /// 项目目录（扫项目里的表）；只看一个数据文件时改用 --file
+    #[arg(value_name = "PROJECT", required_unless_present = "file")]
+    path: Option<PathBuf>,
+    /// 直接扫一个数据文件（CSV/TSV/JSON，或 `-` 读标准输入）；不需要项目
+    #[arg(long, value_name = "FILE|-", conflicts_with = "path")]
+    file: Option<String>,
     /// 只看某张表（默认扫描模板里所有已存在的表）
     #[arg(long)]
     table: Option<String>,
@@ -883,7 +887,60 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         }
 
         Command::InferTypes(a) => {
-            let p = Project::open(&a.path, None)?;
+            // 两种用法：扫项目里的表 / 直接扫一个数据文件（导入向导问"这列像什么"）
+            if let Some(file) = &a.file {
+                let (headers, rows) = read_table_for_inference(file)?;
+                let mut columns: Vec<cercis_core::infer::ColumnInference> =
+                    infer_from_rows(&headers, &rows);
+                if let Some(only) = &a.column {
+                    columns.retain(|c| &c.column == only);
+                }
+                if a.only_change {
+                    columns.retain(|c| c.suggest_change);
+                }
+                if cli.json {
+                    print_json(&serde_json::json!({
+                        "schema": "cercis.cli/1",
+                        "ok": true,
+                        "source": file,
+                        "threshold": a.min_confidence,
+                        "columns": columns,
+                    }));
+                } else {
+                    println!("来源：{file}（未对照模板，只看数据本身）\n");
+                    for c in &columns {
+                        match &c.profile.recommended {
+                            Some(r) => println!(
+                                "{} → 建议 {r}（{}）",
+                                c.column,
+                                confidence_text(&c.profile)
+                            ),
+                            None => println!(
+                                "{} → 无强建议（{}）",
+                                c.column,
+                                confidence_text(&c.profile)
+                            ),
+                        }
+                        let s = &c.profile.stats;
+                        println!(
+                            "    非空 {}／共 {} 格（空 {}，占位符写法 {}）",
+                            s.non_empty, s.total, s.empty, s.missing_markers
+                        );
+                        if let Some(text) = counterexamples_text(&c.profile) {
+                            println!("    反例：{text}");
+                        }
+                        for n in &c.profile.notes {
+                            println!("    注：{n}");
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            let path = a
+                .path
+                .clone()
+                .ok_or_else(|| CercisError::Invalid("请给项目目录，或用 --file 指定数据文件".into()))?;
+            let p = Project::open(&path, None)?;
             let template = p.template()?;
             let tables: Vec<String> = match &a.table {
                 Some(t) => vec![t.clone()],
@@ -965,21 +1022,10 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                             c.declared_counterexamples.join("、")
                         );
                     }
-                    let counter: Vec<String> = c
-                        .profile
-                        .candidates
-                        .iter()
-                        .filter(|cand| !cand.counterexamples.is_empty())
-                        .take(1)
-                        .flat_map(|cand| {
-                            cand.counterexamples
-                                .iter()
-                                .map(|v| format!("{v}（不符 {}）", cand.domain))
-                                .collect::<Vec<_>>()
-                        })
-                        .collect();
-                    if !counter.is_empty() && c.suggest_change {
-                        println!("    反例：{}", counter.join("、"));
+                    if c.suggest_change {
+                        if let Some(text) = counterexamples_text(&c.profile) {
+                            println!("    反例：{text}");
+                        }
                     }
                     for n in &c.profile.notes {
                         println!("    注：{n}");
@@ -1510,6 +1556,31 @@ fn confidence_text(profile: &cercis_core::infer::Profile) -> String {
     }
 }
 
+/// 反例那一行：优先给**建议类型**下的反例（那才是"改类型前该看一眼"的格子）。
+fn counterexamples_text(profile: &cercis_core::infer::Profile) -> Option<String> {
+    let target = profile
+        .recommended
+        .as_deref()
+        .and_then(|r| profile.candidates.iter().find(|c| c.domain == r))
+        .or_else(|| {
+            profile
+                .candidates
+                .iter()
+                .find(|c| !c.counterexamples.is_empty())
+        })?;
+    if target.counterexamples.is_empty() {
+        return None;
+    }
+    Some(
+        target
+            .counterexamples
+            .iter()
+            .map(|v| format!("{v}（不符 {}）", target.domain))
+            .collect::<Vec<_>>()
+            .join("、"),
+    )
+}
+
 /// 把 `--type/--range/...` 组装成字段补丁。
 fn build_field_patch(
     a: &SetFieldTypeArgs,
@@ -1568,6 +1639,68 @@ fn same_issue(a: &cercis_core::Issue, b: &cercis_core::Issue) -> bool {
 ///
 /// 只检查模板里声明过的列：模板之外的列（`--allow-new-columns`）没有类型可依据，
 /// 直接跳过——**放行不猜**。
+/// 读一个数据文件（CSV/TSV/JSON，或 `-` 读标准输入）用于类型推断，保留列顺序。
+fn read_table_for_inference(from: &str) -> Result<(Vec<String>, Vec<Row>), CercisError> {
+    let rows = read_rows_input(from)?;
+    let headers: Vec<String> = if from == "-" {
+        // 标准输入只有 JSON：列顺序取各行键名字典序（BTreeMap 已经排好）
+        let mut keys: Vec<String> = Vec::new();
+        for r in &rows {
+            for k in r.keys() {
+                if !keys.contains(k) {
+                    keys.push(k.clone());
+                }
+            }
+        }
+        keys
+    } else {
+        let path = Path::new(from);
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if matches!(ext.as_str(), "csv" | "tsv" | "txt") {
+            let delimiter = if ext == "tsv" { b'\t' } else { b',' };
+            let mut rdr = csv::ReaderBuilder::new()
+                .has_headers(true)
+                .flexible(true)
+                .delimiter(delimiter)
+                .from_path(path)?;
+            rdr.headers()?
+                .iter()
+                .map(|h| h.trim_start_matches('\u{feff}').trim().to_string())
+                .collect()
+        } else {
+            let mut keys: Vec<String> = Vec::new();
+            for r in &rows {
+                for k in r.keys() {
+                    if !keys.contains(k) {
+                        keys.push(k.clone());
+                    }
+                }
+            }
+            keys
+        }
+    };
+    Ok((headers, rows))
+}
+
+/// 从"已经读进来的行"推类型（不涉及项目模板）。
+fn infer_from_rows(headers: &[String], rows: &[Row]) -> Vec<cercis_core::infer::ColumnInference> {
+    let cols: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+    let mut table = cercis_core::Table::in_memory("/tmp/cercis-infer-input.csv", &cols);
+    for r in rows {
+        table.push(r.clone());
+    }
+    let mut out = cercis_core::infer::infer_table(&table, &[]);
+    for c in out.iter_mut() {
+        // 没有模板可对照：声明类型留空，建议就是"该用什么类型"
+        c.declared_type = String::new();
+        c.suggest_change = c.profile.recommended.is_some();
+    }
+    out
+}
+
 fn check_cells_against_template(
     template: &cercis_core::Template,
     table: &str,
