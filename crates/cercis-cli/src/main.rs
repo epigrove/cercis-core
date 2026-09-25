@@ -103,6 +103,9 @@ struct InstallTemplateArgs {
     /// 从模板文件装入（科研工具包提供的模板走这条路）
     #[arg(long, value_name = "FILE")]
     file: Option<PathBuf>,
+    /// 代哪个插件登记（D37：登记后，停用该插件就能把模板还原回去）
+    #[arg(long, value_name = "PLUGIN")]
+    plugin: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -112,6 +115,9 @@ struct TermsArgs {
     /// 装入术语包文件（写入 <项目>/terms.yaml；不动数据）
     #[arg(long, value_name = "FILE")]
     file: Option<PathBuf>,
+    /// 代哪个插件登记（D37：登记后，停用该插件就能把术语包还原回去）
+    #[arg(long, value_name = "PLUGIN")]
+    plugin: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -237,6 +243,79 @@ struct PluginsArgs {
     /// 全局插件目录（可选）
     #[arg(long)]
     global_dir: Option<PathBuf>,
+    #[command(subcommand)]
+    action: Option<PluginsAction>,
+}
+
+/// 插件相关动作（不写就是"列出"）。
+#[derive(Subcommand, Debug)]
+enum PluginsAction {
+    /// 列出注册台账（谁往项目里放了什么）
+    Registered(RegisteredArgs),
+    /// 登记一条（插件对项目结构的增改；停用时靠它回滚）
+    Register(RegisterArgs),
+    /// 撤销某个插件的全部登记（倒序；先加 --dry-run 看会撤什么）
+    Unregister(UnregisterArgs),
+    /// 停用插件：记进停用名单，并（默认）回滚它的登记
+    Disable(DisableArgs),
+    /// 重新启用插件
+    Enable(EnableArgs),
+}
+
+#[derive(Args, Debug)]
+struct RegisteredArgs {
+    /// 只看某个插件
+    #[arg(long)]
+    plugin: Option<String>,
+    /// 连已撤回 / 被拦下的一起列出来
+    #[arg(long)]
+    all: bool,
+}
+
+#[derive(Args, Debug)]
+struct RegisterArgs {
+    /// 插件 ID（谁登记的）
+    #[arg(long)]
+    plugin: String,
+    /// 种类：table / column / view / terms / template / cache / note
+    #[arg(long)]
+    kind: String,
+    /// 目标：表名 / 表.列 / views/x.yaml / 包名 / 一句话
+    #[arg(long)]
+    target: String,
+    /// 补充信息（可重复，形如 --detail type=number）
+    #[arg(long = "detail", value_name = "K=V")]
+    details: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+struct UnregisterArgs {
+    /// 插件 ID
+    #[arg(long)]
+    plugin: String,
+    /// 只看会撤什么，不动文件
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+struct DisableArgs {
+    /// 插件 ID
+    #[arg(long)]
+    id: String,
+    /// 不动它的登记（默认会回滚）
+    #[arg(long)]
+    keep_registrations: bool,
+    /// 只看会撤什么，不动文件
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+struct EnableArgs {
+    /// 插件 ID
+    #[arg(long)]
+    id: String,
 }
 
 #[derive(Args, Debug)]
@@ -489,6 +568,18 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
 
         Command::InstallTemplate(a) => {
             let p = Project::open(&a.path, None)?;
+            // D37：装模板是"覆盖式"改动——**改动前**先把上一份备份下来，
+            // 这样停用插件时能原样还回去（备份名里带登记编号）
+            let registration_id = a.plugin.as_ref().map(|_| cercis_core::ids::new_machine_id());
+            let previous_template = p.template().map(|t| t.name).unwrap_or_default();
+            let mut backup_detail = std::collections::BTreeMap::new();
+            if let (Some(plugin), Some(id)) = (&a.plugin, &registration_id) {
+                let _ = plugin;
+                let (backup, _before_hash) =
+                    cercis_core::registry::backup_for(&a.path, id, "template.yaml")?;
+                backup_detail.insert("backup".to_string(), backup);
+                backup_detail.insert("previous".to_string(), previous_template);
+            }
             let t = match (&a.file, &a.name) {
                 // 从文件装入：科研工具包等外部提供模板走这条通道
                 // （内核保持行业普适——它不认识"科研"，只认识"模板文件"）
@@ -514,12 +605,46 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                 }
             };
             let created = p.install_template(&t)?;
+            // 登记：装了模板之后，这个插件就对项目结构有了一个"可撤销的改动"
+            if let (Some(plugin), Some(id)) = (&a.plugin, &registration_id) {
+                let mut reg = cercis_core::Registry::load(&a.path)?;
+                backup_detail.insert(
+                    "sha256".to_string(),
+                    cercis_core::registry::file_hash(&a.path.join("template.yaml")),
+                );
+                let entry = reg.register_with_id(
+                    plugin,
+                    cercis_core::RegKind::Template,
+                    &t.name,
+                    backup_detail.clone(),
+                    id,
+                )?;
+                // 模板带出来的新表也要登记：停用插件时，空表跟着撤掉（有数据的会拦下）
+                for table in &created {
+                    let mut detail = std::collections::BTreeMap::new();
+                    detail.insert("from".to_string(), format!("模板 {}", t.name));
+                    reg.register(plugin, cercis_core::RegKind::Table, table, detail)?;
+                }
+                reg.save(&a.path)?;
+                if !cli.json {
+                    println!(
+                        "（已为插件 {} 登记：模板 {}；停用它时会恢复上一份 {}）",
+                        entry.plugin,
+                        entry.target,
+                        backup_detail
+                            .get("previous")
+                            .cloned()
+                            .unwrap_or_else(|| "（无）".into())
+                    );
+                }
+            }
             if cli.json {
                 print_json(&serde_json::json!({
                     "schema": "cercis.cli/1",
                     "ok": true,
                     "template": t.name,
                     "created_tables": created,
+                    "registered_for": a.plugin,
                 }));
             } else {
                 println!("已装入模板：{}", t.name);
@@ -541,7 +666,40 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                     CercisError::NotFound(format!("读不到术语包 {}：{e}", file.display()))
                 })?;
                 let terms = cercis_core::Terms::from_yaml(&text)?;
+                // D37：切术语包是"覆盖式"改动——先备份上一份，再切，再登记
+                let registration_id =
+                    a.plugin.as_ref().map(|_| cercis_core::ids::new_machine_id());
+                let mut backup_detail = std::collections::BTreeMap::new();
+                if let (Some(_), Some(id)) = (&a.plugin, &registration_id) {
+                    let previous = p
+                        .terms()?
+                        .map(|t| t.profile)
+                        .unwrap_or_else(|| {
+                            p.template()
+                                .map(|t| t.terms_profile)
+                                .unwrap_or_default()
+                        });
+                    let (backup, _) =
+                        cercis_core::registry::backup_for(&a.path, id, "terms.yaml")?;
+                    backup_detail.insert("backup".to_string(), backup);
+                    backup_detail.insert("previous".to_string(), previous);
+                }
                 p.install_terms(&terms)?;
+                if let (Some(plugin), Some(id)) = (&a.plugin, &registration_id) {
+                    let mut reg = cercis_core::Registry::load(&a.path)?;
+                    backup_detail.insert(
+                        "sha256".to_string(),
+                        cercis_core::registry::file_hash(&a.path.join("terms.yaml")),
+                    );
+                    reg.register_with_id(
+                        plugin,
+                        cercis_core::RegKind::Terms,
+                        &terms.profile,
+                        backup_detail.clone(),
+                        id,
+                    )?;
+                    reg.save(&a.path)?;
+                }
                 if cli.json {
                     print_json(&serde_json::json!({
                         "schema": "cercis.cli/1",
@@ -550,6 +708,7 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                         "label_cn": terms.label_cn,
                         "overrides": terms.override_count(),
                         "source": file.display().to_string(),
+                        "registered_for": a.plugin,
                     }));
                 } else {
                     println!(
@@ -757,27 +916,295 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         Command::Plugins(a) => {
             let found = cercis_core::plugin::discover(&a.path, a.global_dir.as_deref())?;
             let trust = cercis_core::TrustRecord::load(&a.path)?;
+            let state = cercis_core::plugin::PluginState::load(&a.path)?;
+
+            // 子命令：注册台账 / 停用 / 启用
+            if let Some(action) = &a.action {
+                return match action {
+                    PluginsAction::Registered(x) => {
+                        let reg = cercis_core::Registry::load(&a.path)?;
+                        let list: Vec<&cercis_core::Registration> = reg
+                            .entries
+                            .iter()
+                            .filter(|e| {
+                                x.plugin.as_deref().map(|p| e.plugin == p).unwrap_or(true)
+                                    && (x.all
+                                        || e.state == cercis_core::RegState::Active
+                                        || e.state == cercis_core::RegState::Blocked)
+                            })
+                            .collect();
+                        if cli.json {
+                            print_json(&serde_json::json!({
+                                "schema": "cercis.cli/1",
+                                "ok": true,
+                                "count": list.len(),
+                                "registrations": list,
+                            }));
+                        } else if list.is_empty() {
+                            println!("没有登记（插件还没往这个项目里放过东西）。");
+                        } else {
+                            for e in &list {
+                                let state_cn = match e.state {
+                                    cercis_core::RegState::Active => "生效",
+                                    cercis_core::RegState::Reverted => "已撤回",
+                                    cercis_core::RegState::Blocked => "被拦下",
+                                };
+                                println!(
+                                    "{}｜{}｜{} {}｜{}",
+                                    e.plugin,
+                                    state_cn,
+                                    e.kind.as_str(),
+                                    e.target,
+                                    if e.blocked_reason.is_empty() {
+                                        e.detail
+                                            .get("previous")
+                                            .map(|p| format!("上一份：{p}"))
+                                            .unwrap_or_default()
+                                    } else {
+                                        e.blocked_reason.clone()
+                                    }
+                                );
+                            }
+                        }
+                        Ok(())
+                    }
+                    PluginsAction::Register(x) => {
+                        use std::collections::BTreeMap;
+                        let kind = cercis_core::RegKind::parse(&x.kind).ok_or_else(|| {
+                            CercisError::Invalid(format!(
+                                "未知登记种类：{}（可用：table / column / view / terms / template / cache / note）",
+                                x.kind
+                            ))
+                        })?;
+                        // 覆盖式改动（术语包 / 模板）必须由内核在改动**之前**备份，
+                        // 所以走 `install-template --plugin …` / `terms --plugin …`，不在这里登记
+                        if matches!(
+                            kind,
+                            cercis_core::RegKind::Terms | cercis_core::RegKind::Template
+                        ) {
+                            return Err(CercisError::Invalid(
+                                "术语包与模板要在改动前先备份，请改用：\
+                                 `cercis terms <项目> --file <包> --plugin <插件>` 或 \
+                                 `cercis install-template <项目> --file <模板> --plugin <插件>`"
+                                    .into(),
+                            ));
+                        }
+                        let mut detail: BTreeMap<String, String> = BTreeMap::new();
+                        for kv in &x.details {
+                            let (k, v) = kv.split_once('=').ok_or_else(|| {
+                                CercisError::Invalid(format!("--detail 要写成 k=v，实际：{kv}"))
+                            })?;
+                            detail.insert(k.trim().to_string(), v.trim().to_string());
+                        }
+                        let p = Project::open(&a.path, None)?;
+                        let mut reg = cercis_core::Registry::load(&a.path)?;
+                        let id = cercis_core::ids::new_machine_id();
+                        let entry = reg.register_with_id(
+                            &x.plugin,
+                            kind,
+                            &x.target,
+                            detail,
+                            &id,
+                        )?;
+                        reg.save(&a.path)?;
+                        p.store.append_change(&ChangeEntry::new(
+                            &p.store.identity.user_id,
+                            &p.store.identity.device_for_log(),
+                            "register",
+                            kind.as_str(),
+                            &x.target,
+                            &format!(
+                                "插件 {} 登记：{} {}（撤销时会：{}）",
+                                x.plugin,
+                                kind.as_str(),
+                                x.target,
+                                kind.revert_hint()
+                            ),
+                            "",
+                            "",
+                        ))?;
+                        if cli.json {
+                            print_json(&serde_json::json!({
+                                "schema": "cercis.cli/1",
+                                "ok": true,
+                                "registration": entry,
+                            }));
+                        } else {
+                            println!(
+                                "已登记：{} {}（{}）；撤销时会：{}",
+                                kind.as_str(),
+                                x.target,
+                                x.plugin,
+                                kind.revert_hint()
+                            );
+                        }
+                        Ok(())
+                    }
+                    PluginsAction::Unregister(x) => {
+                        let p = Project::open(&a.path, None)?;
+                        let mut reg = cercis_core::Registry::load(&a.path)?;
+                        let items = reg.revert(&a.path, &x.plugin, x.dry_run)?;
+                        if !x.dry_run && !items.is_empty() {
+                            let reverted = items.iter().filter(|i| i.outcome == "reverted").count();
+                            let blocked = items.iter().filter(|i| i.outcome == "blocked").count();
+                            p.store.append_change(&ChangeEntry::new(
+                                &p.store.identity.user_id,
+                                &p.store.identity.device_for_log(),
+                                "unregister",
+                                "plugin",
+                                &x.plugin,
+                                &format!(
+                                    "撤销插件 {} 的登记：撤回 {} 项，被拦下 {} 项",
+                                    x.plugin, reverted, blocked
+                                ),
+                                "",
+                                "",
+                            ))?;
+                        }
+                        if cli.json {
+                            print_json(&serde_json::json!({
+                                "schema": "cercis.cli/1",
+                                "ok": true,
+                                "dry_run": x.dry_run,
+                                "items": items,
+                            }));
+                        } else if items.is_empty() {
+                            println!("插件 {} 没有需要撤销的登记。", x.plugin);
+                        } else {
+                            for i in &items {
+                                let mark = match i.outcome.as_str() {
+                                    "planned" => "会",
+                                    "reverted" => "✓",
+                                    _ => "✗",
+                                };
+                                println!("{} {} {}：{}", mark, i.kind, i.target, i.message);
+                            }
+                            if x.dry_run {
+                                println!("（试运行：没有动任何文件。去掉 --dry-run 才真正撤销）");
+                            }
+                        }
+                        Ok(())
+                    }
+                    PluginsAction::Disable(x) => {
+                        let p = Project::open(&a.path, None)?;
+                        let mut st = cercis_core::plugin::PluginState::load(&a.path)?;
+                        let mut reg = cercis_core::Registry::load(&a.path)?;
+                        let items = if x.keep_registrations {
+                            Vec::new()
+                        } else {
+                            reg.revert(&a.path, &x.id, x.dry_run)?
+                        };
+                        if !x.dry_run {
+                            st.disable(&x.id);
+                            st.save(&a.path)?;
+                            p.store.append_change(&ChangeEntry::new(
+                                &p.store.identity.user_id,
+                                &p.store.identity.device_for_log(),
+                                "disable",
+                                "plugin",
+                                &x.id,
+                                &format!(
+                                    "停用插件 {}（回滚登记 {} 项{}）",
+                                    x.id,
+                                    items.iter().filter(|i| i.outcome == "reverted").count(),
+                                    if x.keep_registrations {
+                                        "，保留了登记"
+                                    } else {
+                                        ""
+                                    }
+                                ),
+                                "",
+                                "",
+                            ))?;
+                        }
+                        if cli.json {
+                            print_json(&serde_json::json!({
+                                "schema": "cercis.cli/1",
+                                "ok": true,
+                                "dry_run": x.dry_run,
+                                "disabled": x.id,
+                                "rollback": items,
+                            }));
+                        } else if x.dry_run {
+                            println!("试运行：会停用 {}，并撤销 {} 项登记：", x.id, items.len());
+                            for i in &items {
+                                println!("  会 {} {}：{}", i.kind, i.target, i.message);
+                            }
+                        } else {
+                            println!("已停用 {}（撤销登记 {} 项）", x.id, items.len());
+                            for i in items.iter().filter(|i| i.outcome == "blocked") {
+                                println!(
+                                    "  ⚠ 留在项目里了：{} {}——{}",
+                                    i.kind, i.target, i.message
+                                );
+                            }
+                        }
+                        Ok(())
+                    }
+                    PluginsAction::Enable(x) => {
+                        let p = Project::open(&a.path, None)?;
+                        let mut st = cercis_core::plugin::PluginState::load(&a.path)?;
+                        st.enable(&x.id);
+                        st.save(&a.path)?;
+                        p.store.append_change(&ChangeEntry::new(
+                            &p.store.identity.user_id,
+                            &p.store.identity.device_for_log(),
+                            "enable",
+                            "plugin",
+                            &x.id,
+                            &format!("重新启用插件 {}", x.id),
+                            "",
+                            "",
+                        ))?;
+                        if cli.json {
+                            print_json(&serde_json::json!({
+                                "schema": "cercis.cli/1",
+                                "ok": true,
+                                "enabled": x.id,
+                            }));
+                        } else {
+                            println!("已重新启用 {}", x.id);
+                        }
+                        Ok(())
+                    }
+                };
+            }
+
             if cli.json {
                 print_json(&serde_json::json!({
                     "schema": "cercis.cli/1",
                     "ok": true,
-                    "plugins": found.iter().map(|p| serde_json::json!({
-                        "id": p.manifest.id,
-                        "name": p.manifest.name,
-                        "tier": p.manifest.tier,
-                        "origin": p.origin,
-                        "fingerprint": p.fingerprint,
-                        "trusted": trust.is_trusted(&p.manifest.id, &p.fingerprint),
-                        "permissions": p.manifest.permission_summary(),
-                        "ui": p.manifest.ui.len(),
-                    })).collect::<Vec<_>>(),
+                    "plugins": found.iter().map(|p| {
+                        let activation = p.manifest.activation(&a.path);
+                        serde_json::json!({
+                            "id": p.manifest.id,
+                            "name": p.manifest.name,
+                            "namespace": p.manifest.namespace_id(),
+                            "tier": p.manifest.tier,
+                            "origin": p.origin,
+                            "fingerprint": p.fingerprint,
+                            "trusted": trust.is_trusted(&p.manifest.id, &p.fingerprint),
+                            "disabled": state.is_disabled(&p.manifest.id),
+                            "active": activation.active && !state.is_disabled(&p.manifest.id),
+                            "inactive_reasons": activation.reasons,
+                            "permissions": p.manifest.permission_summary(),
+                            "ui": p.manifest.ui.len(),
+                        })
+                    }).collect::<Vec<_>>(),
+                    "conflicts": cercis_core::plugin::conflicts(&found),
+                    "blocked_registrations": cercis_core::Registry::load(&a.path)?.blocked(),
                 }));
             } else if found.is_empty() {
                 println!("未发现插件。");
             } else {
+                let conflicts = cercis_core::plugin::conflicts(&found);
                 for p in &found {
                     let trusted = trust.is_trusted(&p.manifest.id, &p.fingerprint);
-                    let status = if p.origin == "project" {
+                    let disabled = state.is_disabled(&p.manifest.id);
+                    let activation = p.manifest.activation(&a.path);
+                    let status = if disabled {
+                        "已停用"
+                    } else if p.origin == "project" {
                         if trusted {
                             "已信任"
                         } else {
@@ -787,14 +1214,35 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                         "全局"
                     };
                     println!(
-                        "{}  {}  [{}]  {}  权限：{}  界面扩展：{}",
+                        "{}  {}  [{}]  {}  {}  权限：{}  界面扩展：{}",
                         p.manifest.id,
                         p.manifest.name,
                         p.origin,
                         status,
+                        if disabled {
+                            "".to_string()
+                        } else if activation.active {
+                            "生效".to_string()
+                        } else {
+                            format!("未生效（{}）", activation.reasons.join("；"))
+                        },
                         p.manifest.permission_summary(),
                         p.manifest.ui.len()
                     );
+                }
+                for c in conflicts {
+                    println!("⚠ {c}");
+                }
+                let registry = cercis_core::Registry::load(&a.path)?;
+                let blocked = registry.blocked();
+                if !blocked.is_empty() {
+                    println!(
+                        "有 {} 项登记撤销时被拦下（背后有数据或文件被改过）：",
+                        blocked.len()
+                    );
+                    for b in blocked {
+                        println!("  {} {}——{}", b.plugin, b.target, b.blocked_reason);
+                    }
                 }
             }
         }
@@ -806,13 +1254,35 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                 .find(|p| p.manifest.id == a.id)
                 .ok_or_else(|| CercisError::NotFound(format!("未找到插件：{}", a.id)))?;
             let mut tr = cercis_core::TrustRecord::load(&a.path)?;
+            // 信任也是一次"项目状态变更"，按 D39 记进流水
+            let p = Project::open(&a.path, None)?;
             if a.revoke {
                 tr.untrust(&a.id);
                 tr.save(&a.path)?;
+                p.store.append_change(&ChangeEntry::new(
+                    &p.store.identity.user_id,
+                    &p.store.identity.device_for_log(),
+                    "untrust",
+                    "plugin",
+                    &a.id,
+                    &format!("撤销对插件 {} 的信任", a.id),
+                    "",
+                    "",
+                ))?;
                 println!("已撤销信任：{}", a.id);
             } else {
                 tr.trust(&a.id, &target.fingerprint);
                 tr.save(&a.path)?;
+                p.store.append_change(&ChangeEntry::new(
+                    &p.store.identity.user_id,
+                    &p.store.identity.device_for_log(),
+                    "trust",
+                    "plugin",
+                    &a.id,
+                    &format!("信任插件 {}（指纹 {}）", a.id, target.fingerprint),
+                    "",
+                    "",
+                ))?;
                 println!("已信任插件：{}", a.id);
                 println!("  权限：{}", target.manifest.permission_summary());
                 println!("  指纹：{}", target.fingerprint);

@@ -116,6 +116,9 @@ impl AiContract {
             cmd("cercis append-many <项目> --table <表> --from <文件>", "批量写入/导入（先加 --dry-run 试运行）", "cercis append-many ./项目 --table records --from 数据.csv --dry-run --json"),
             cmd("cercis correct <项目> --table <表> --target <编号> --field <列> --old <旧值> --new <新值>", "记录更正（不覆盖原值）", "cercis correct ./项目 --table records --target R-0001 --field value_num --old 12.5 --new 12.7 --reason '笔误'"),
             cmd("cercis note <项目> --action <动作> --summary <说明>", "记一条流水（导出等动作留痕）", "cercis note ./项目 --action export --summary '导出 observations 到 /tmp/out.csv' --source-ref /tmp/out.csv"),
+            cmd("cercis plugins <项目>", "看插件：是否生效、为什么没生效、有没有键冲突、有没有撤不回去的登记", "cercis plugins ./项目 --json"),
+            cmd("cercis plugins <项目> register --plugin <ID> --kind <KIND> --target <目标>", "插件登记自己对项目结构的增改（停用时按倒序回滚）", "cercis plugins ./项目 register --plugin demo_io --kind column --target observations.spad_note"),
+            cmd("cercis plugins <项目> disable --id <ID>", "停用插件并回滚它的登记（先加 --dry-run 看会撤什么）", "cercis plugins ./项目 disable --id demo_io --dry-run"),
             cmd("cercis agents <项目>", "刷新 AI 材料与 Agent 技能包", "cercis agents ./项目"),
             cmd("cercis skill <项目>", "生成 Agent 技能包（--install codex|claude 可直接装）", "cercis skill ./项目 --install codex"),
         ];
@@ -134,6 +137,8 @@ impl AiContract {
                 "缺失值留空单元格，不要写 NA / - / 0 代替".into(),
                 "类型由内核统一定义（七种值域 + 六种约束）：照 `cercis value-types --json` 用，不要自造类型".into(),
                 "改类型只改模板、不动数据；改动前先 `cercis infer-types` 看建议与反例，再 `set-field-type --dry-run` 看影响".into(),
+                "插件对项目结构的增改必须经内核登记（`install-template --plugin …` 或 `plugins register`）：停用插件时按倒序回滚这些登记".into(),
+                "**数据永不回滚**：表里已有数据、列里已有值，回滚就停下来交给人——要纠正数据用 `correct`（更正即补偿）".into(),
                 "统计、建模与绘图交给 R/Python/SPSS；本工具只做数据整理与导出".into(),
                 "涉及真实数据的操作前，先确认用户意图".into(),
             ],

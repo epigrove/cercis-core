@@ -45,6 +45,13 @@ pub struct Manifest {
     /// 术语包
     #[serde(default)]
     pub terms_profile: String,
+    /// **项目状态指纹**（D39）：模板 + 术语包 + 插件台账 + 停用名单 + 信任记录 的内容指纹。
+    ///
+    /// 为什么要有：表指纹只能说明"数据是这一版"，说明不了"项目状态是这一版"——
+    /// 换了术语包、装了插件、改了信任，导出物与推理结论都会变。
+    /// 导出清单引用这个指纹，就能把"数据 + 结构 + 插件状态"一起对回去。
+    #[serde(default)]
+    pub state_hash: String,
     /// 表清单
     pub tables: Vec<TableEntry>,
     /// 变更水位数（流水条数）
@@ -112,6 +119,7 @@ impl Manifest {
             generated_at: crate::ids::now_iso8601(),
             template,
             terms_profile: cfg.terms_profile.clone(),
+            state_hash: state_hash(root),
             tables: entries,
             change_count,
             last_change_at,
@@ -145,6 +153,33 @@ fn read_change_watermark(root: &Path) -> Result<(usize, String)> {
         .and_then(|r| r.get("ts").cloned())
         .unwrap_or_default();
     Ok((table.rows.len(), last))
+}
+
+/// 项目状态指纹（D39）：把"非数据表"的项目状态一起算进去。
+///
+/// 覆盖：`template.yaml`、`terms.yaml`、插件台账、停用名单、信任记录。
+/// 缺哪个就跳过哪个（老项目没有这些文件也应该能生成清单）。
+fn state_hash(root: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    const PARTS: [&str; 5] = [
+        "template.yaml",
+        "terms.yaml",
+        crate::registry::REGISTRY_FILE,
+        crate::plugin::STATE_FILE,
+        "plugins/trust.yaml",
+    ];
+    let mut hasher = Sha256::new();
+    for part in PARTS {
+        let path = root.join(part);
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        // 文件名一起进摘要，免得"有模板没术语"与"有术语没模板"撞成同一个指纹
+        hasher.update(part.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(&bytes);
+    }
+    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]
