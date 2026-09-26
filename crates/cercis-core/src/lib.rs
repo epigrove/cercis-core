@@ -36,6 +36,7 @@
 
 pub mod ai;
 pub mod config;
+pub mod desired;
 pub mod error;
 pub mod format;
 pub mod history;
@@ -62,6 +63,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 pub use ai::{AgentSkill, AiContract};
 pub use config::ProjectConfig;
+pub use desired::{Desired, DesiredDiff, WantedPlugin};
 pub use error::{CercisError, Result};
 pub use manifest::Manifest;
 pub use market::{Installs, MarketEntry, MarketPlugin, Marketplace, UserMarkets, PRESET_MARKETS};

@@ -322,12 +322,8 @@ impl Marketplace {
                     p.id, p.path
                 )));
             }
-            if p.requires_plugin_api > PLUGIN_API_VERSION {
-                return Err(CercisError::Invalid(format!(
-                    "插件 {} 需要接口版本 {}，本内核只支持到 {}——它需要更新的内核",
-                    p.id, p.requires_plugin_api, PLUGIN_API_VERSION
-                )));
-            }
+            // 注意：某个插件要求更新的内核，不该让**整份市场**读不出来——
+            // 同一份市场里别的插件可能照常可用。这里只记录，到装/升级那一步再拦（见 check_updates）。
             if p.version.trim().is_empty() {
                 return Err(CercisError::Invalid(format!(
                     "插件 {} 没写版本（version）",
@@ -364,6 +360,9 @@ pub struct InstallRecord {
     /// 是不是随包插件（D42）：随包的**不能删除**，只能停用/屏蔽
     #[serde(default)]
     pub bundled: bool,
+    /// 安装时的权限摘要（字符串）。升级检查靠它对比"权限有没有变"（FR-P47）
+    #[serde(default)]
+    pub permissions: String,
     /// 从哪个市场装的（市场的 id 或地址）
     #[serde(default)]
     pub market: String,
@@ -464,6 +463,118 @@ impl Removals {
 /// 删除名单文件。
 pub const REMOVED_FILE: &str = "removed.json";
 
+/// 一条更新检查结果（FR-P47：**只提示、不自动升级**）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateItem {
+    pub id: String,
+    /// 已装版本
+    pub installed_version: String,
+    /// 市场里的版本（市场里没有这个插件时为空）
+    pub available_version: String,
+    /// update_available / up_to_date / newer_installed / not_in_market / incompatible
+    pub status: String,
+    /// 权限摘要：已装 vs 市场
+    pub permissions_installed: String,
+    pub permissions_available: String,
+    /// 权限有变化 → **升级前必须重新确认**（FR-P47）
+    pub needs_reconfirmation: bool,
+    /// 市场里的条目要求的插件接口版本；高于本内核就不能升
+    pub requires_plugin_api: u32,
+    pub api_compatible: bool,
+}
+
+impl UpdateItem {
+    /// 能不能升（版本更新 + 接口兼容 + 不是"随包"）
+    pub fn actionable(&self) -> bool {
+        self.status == "update_available" && self.api_compatible
+    }
+}
+
+/// 对比"已装"与"市场清单"：**只算结论，不动任何文件**。
+///
+/// 纪律（FR-P47）：只提示、不自动升级；权限变化的升级要重新确认，所以这里把
+/// `needs_reconfirmation` 单独标出来，由界面去问用户。
+pub fn check_updates(installs: &Installs, market: &Marketplace) -> Vec<UpdateItem> {
+    let mut out = Vec::new();
+    for record in &installs.records {
+        let entry = market.plugin(&record.id);
+        let available = entry.map(|e| e.version.clone()).unwrap_or_default();
+        let permissions_available = entry.map(|e| e.permissions.clone()).unwrap_or_default();
+        let requires_plugin_api = entry.map(|e| e.requires_plugin_api).unwrap_or(0);
+        let api_compatible = requires_plugin_api <= PLUGIN_API_VERSION;
+        let status = match entry {
+            None => "not_in_market",
+            Some(_) if !api_compatible => "incompatible",
+            Some(_) => match compare_versions(&record.version, &available) {
+                std::cmp::Ordering::Less => "update_available",
+                std::cmp::Ordering::Equal => "up_to_date",
+                std::cmp::Ordering::Greater => "newer_installed",
+            },
+        };
+        let needs_reconfirmation = status == "update_available"
+            && !permissions_available.trim().is_empty()
+            && !same_permissions(&record.permissions, &permissions_available);
+        out.push(UpdateItem {
+            id: record.id.clone(),
+            installed_version: record.version.clone(),
+            available_version: available,
+            status: status.to_string(),
+            permissions_installed: record.permissions.clone(),
+            permissions_available,
+            needs_reconfirmation,
+            requires_plugin_api,
+            api_compatible,
+        });
+    }
+    out
+}
+
+/// 版本比较：按数字段比（`0.10.0` > `0.9.0`；非数字段按字符串兜底）。
+pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |s: &str| -> Vec<String> {
+        s.trim()
+            .trim_start_matches('v')
+            .split(['.', '-', '+'])
+            .map(|x| x.trim().to_string())
+            .collect()
+    };
+    let (mut va, mut vb) = (parse(a), parse(b));
+    while va.len() < vb.len() {
+        va.push("0".to_string());
+    }
+    while vb.len() < va.len() {
+        vb.push("0".to_string());
+    }
+    for i in 0..va.len() {
+        let x = va[i].clone();
+        let y = vb[i].clone();
+        let nx = x.parse::<u64>();
+        let ny = y.parse::<u64>();
+        let ord = match (nx, ny) {
+            (Ok(nx), Ok(ny)) => nx.cmp(&ny),
+            _ => x.cmp(&y),
+        };
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// 两个权限摘要是不是同一套（忽略顺序与分隔符差异）。
+fn same_permissions(a: &str, b: &str) -> bool {
+    let norm = |s: &str| -> Vec<String> {
+        let mut parts: Vec<String> = s
+            .split(['、', ';', ',', '；'])
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect();
+        parts.sort();
+        parts
+    };
+    norm(a) == norm(b)
+}
+
 impl Installs {
     /// 载入（默认位置：`<用户插件目录>/installs.json`）。
     pub fn load(global_dir: impl AsRef<Path>) -> Result<Self> {
@@ -552,6 +663,7 @@ pub fn install_from_dir(
     let record = InstallRecord {
         id: manifest.id.clone(),
         bundled,
+        permissions: manifest.permission_summary(),
         market: market.to_string(),
         repository: repository.to_string(),
         git_ref: git_ref.to_string(),
@@ -743,8 +855,9 @@ plugins:
         // 路径跑到仓库外面
         assert!(Marketplace::from_text(&GOOD.replace("plugins/demo_io", "../外面")).is_err());
         assert!(Marketplace::from_text(&GOOD.replace("plugins/demo_io", "/etc/passwd")).is_err());
-        // 接口版本高于内核
-        assert!(Marketplace::from_text(&GOOD.replace("requires_plugin_api: 1", "requires_plugin_api: 99")).is_err());
+        // 接口版本高于内核：市场仍可读（同一份市场里别的插件照常可用），只是那一条不能装
+        let newer = Marketplace::from_text(&GOOD.replace("requires_plugin_api: 1", "requires_plugin_api: 99"));
+        assert!(newer.is_ok(), "不能因为一个插件太新就让整份市场读不出来");
         // id 重复
         let dup = GOOD.replace(
             "    summary: 演示用",
@@ -947,5 +1060,107 @@ plugins:
         // 没有安装记录（随包/未知来源）不删——但会给"怎么让它别碍事"的指路
         let err = uninstall(&global, "某个随包插件", false, "不想用").unwrap_err();
         assert!(err.to_string().contains("没有市场安装记录"), "{err}");
+    }
+
+    #[test]
+    fn version_compare_handles_numeric_segments() {
+        assert_eq!(compare_versions("0.1.0", "0.1.0"), std::cmp::Ordering::Equal);
+        assert_eq!(compare_versions("0.9.0", "0.10.0"), std::cmp::Ordering::Less);
+        assert_eq!(compare_versions("1.0.0", "0.9.9"), std::cmp::Ordering::Greater);
+        assert_eq!(compare_versions("v0.2.0", "0.2.0"), std::cmp::Ordering::Equal);
+        assert_eq!(compare_versions("0.2", "0.2.0"), std::cmp::Ordering::Equal);
+    }
+
+    fn rec(id: &str, version: &str, permissions: &str) -> InstallRecord {
+        InstallRecord {
+            id: id.into(),
+            bundled: false,
+            permissions: permissions.into(),
+            market: "演示市场".into(),
+            repository: "repo".into(),
+            git_ref: "main".into(),
+            version: version.into(),
+            fingerprint: "abc".into(),
+            path: id.into(),
+            installed_at: "2026-09-26T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn update_check_flags_permission_changes_for_reconfirmation() {
+        let installs = Installs {
+            schema: "cercis.installs/1".into(),
+            records: vec![
+                rec("demo_io", "0.1.0", "读取数据"),
+                rec("steady", "0.3.0", "读取数据"),
+            ],
+        };
+        let market = Marketplace::from_text(
+            r#"{"schema": "cercis.marketplace/1", "name": "演示市场",
+                 "plugins": [
+                   {"id": "demo_io", "path": "plugins/demo_io", "version": "0.2.0",
+                    "permissions": "写入数据、读取数据", "requires_plugin_api": 1},
+                   {"id": "steady", "path": "plugins/steady", "version": "0.3.0",
+                    "permissions": "读取数据", "requires_plugin_api": 1}
+                 ]}"#,
+        )
+        .unwrap();
+        let items = check_updates(&installs, &market);
+        let demo = items.iter().find(|i| i.id == "demo_io").unwrap();
+        assert_eq!(demo.status, "update_available");
+        assert!(demo.actionable());
+        assert!(
+            demo.needs_reconfirmation,
+            "权限摘要的写法不同但内容相同 → 不该当成权限变化：{demo:?}"
+        );
+
+        // 真的多了一项权限 → 必须重新确认
+        let market2 = Marketplace::from_text(
+            r#"{"schema": "cercis.marketplace/1", "name": "演示市场",
+                 "plugins": [
+                   {"id": "demo_io", "path": "plugins/demo_io", "version": "0.2.0",
+                    "permissions": "读取数据、写入数据、访问网络", "requires_plugin_api": 1},
+                   {"id": "steady", "path": "plugins/steady", "version": "0.3.0",
+                    "permissions": "读取数据", "requires_plugin_api": 1}
+                 ]}"#,
+        )
+        .unwrap();
+        let items2 = check_updates(&installs, &market2);
+        let demo2 = items2.iter().find(|i| i.id == "demo_io").unwrap();
+        assert!(demo2.needs_reconfirmation, "{demo2:?}");
+        let steady = items2.iter().find(|i| i.id == "steady").unwrap();
+        assert_eq!(steady.status, "up_to_date");
+        assert!(!steady.needs_reconfirmation);
+
+        // 装得比市场新 → 不提示降级
+        let installs_newer = Installs {
+            schema: "cercis.installs/1".into(),
+            records: vec![rec("steady", "0.4.0", "读取数据")],
+        };
+        let items3 = check_updates(&installs_newer, &market2);
+        assert_eq!(items3[0].status, "newer_installed");
+        assert!(!items3[0].actionable());
+    }
+
+    #[test]
+    fn update_check_marks_incompatible_and_absent_plugins() {
+        let installs = Installs {
+            schema: "cercis.installs/1".into(),
+            records: vec![rec("x", "1.0.0", "读取数据"), rec("gone", "1.0.0", "读取数据")],
+        };
+        let market = Marketplace::from_text(
+            r#"{"schema": "cercis.marketplace/1", "name": "m", "plugins": [
+                 {"id": "x", "path": "plugins/x", "version": "2.0.0", "permissions": "读取数据",
+                  "requires_plugin_api": 99}]}"#,
+        )
+        .unwrap();
+        let items = check_updates(&installs, &market);
+        let x = items.iter().find(|i| i.id == "x").unwrap();
+        assert_eq!(x.status, "incompatible", "接口版本太高不能升");
+        assert!(!x.actionable());
+        assert_eq!(
+            items.iter().find(|i| i.id == "gone").unwrap().status,
+            "not_in_market"
+        );
     }
 }

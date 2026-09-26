@@ -266,6 +266,27 @@ enum PluginsAction {
     Block(EnableArgs),
     /// 取消屏蔽（不自动启用，要不要用由你决定）
     Unblock(EnableArgs),
+    /// 看"期望状态与实际状态"的差异（plugins/desired.yaml）
+    Desired(DesiredArgs),
+    /// 按期望状态对齐：改停用/屏蔽；装/删给出清单（给 --from 就顺手把本地目录里的装上）
+    Reconcile(ReconcileArgs),
+}
+
+#[derive(Args, Debug)]
+struct DesiredArgs {
+    /// 写入/替换期望状态文件（YAML；不给就只对账）
+    #[arg(long, value_name = "FILE")]
+    write: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct ReconcileArgs {
+    /// 只看会对齐什么，不动任何东西
+    #[arg(long)]
+    dry_run: bool,
+    /// 已下载好的市场仓库目录（给了就按 desired.yaml 里的 market 找对应清单并安装）
+    #[arg(long)]
+    from: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -422,6 +443,15 @@ enum MarketAction {
         /// 记一句"为什么不用它了"（可选）
         #[arg(long, default_value = "")]
         note: String,
+    },
+    /// 检查更新：对比已装与市场清单（**只提示、不自动升级**；权限变化要重新确认）
+    Check {
+        /// 已下载好的市场仓库目录（app 的下载缓存；内核不联网）
+        #[arg(long)]
+        from: PathBuf,
+        /// 只看"有更新的"（默认全列）
+        #[arg(long)]
+        only_updates: bool,
     },
     /// 找回被删掉的插件（清墓碑；给 --from 就顺手装回来）
     Restore {
@@ -1263,6 +1293,224 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                             }));
                         } else {
                             println!("已重新启用 {}", x.id);
+                        }
+                        Ok(())
+                    }
+                    PluginsAction::Desired(x) => {
+                        // --write：把这份期望状态写进项目（手写或 app 生成都行）
+                        if let Some(file) = &x.write {
+                            let text = std::fs::read_to_string(file).map_err(|e| {
+                                CercisError::NotFound(format!("读不到 {}：{e}", file.display()))
+                            })?;
+                            let desired = cercis_core::Desired::from_yaml(&text)?;
+                            desired.save(&a.path)?;
+                            if cli.json {
+                                print_json(&serde_json::json!({
+                                    "schema": "cercis.cli/1",
+                                    "ok": true,
+                                    "action": "plugins.desired.write",
+                                    "path": cercis_core::desired::DESIRED_FILE,
+                                    "install": desired.install.len(),
+                                    "disable": desired.disable.len(),
+                                    "block": desired.block.len(),
+                                }));
+                            } else {
+                                println!(
+                                    "已写入期望状态：{}（想装 {} 个、停用 {} 个、屏蔽 {} 个）",
+                                    cercis_core::desired::DESIRED_FILE,
+                                    desired.install.len(),
+                                    desired.disable.len(),
+                                    desired.block.len()
+                                );
+                            }
+                            return Ok(());
+                        }
+                        // 只对账
+                        let Some(desired) = cercis_core::Desired::load_optional(&a.path)? else {
+                            return Err(CercisError::NotFound(format!(
+                                "{} 不存在——先写一份（--write <文件>），或手写这个文件",
+                                cercis_core::desired::DESIRED_FILE
+                            )));
+                        };
+                        let installs = cercis_core::Installs::load(&global_dir_plugins()?)?;
+                        let state = cercis_core::plugin::PluginState::load(&a.path)?;
+                        let known: Vec<String> = found.iter().map(|p| p.manifest.id.clone()).collect();
+                        let d = cercis_core::desired::diff(&desired, &installs, &state, &known);
+                        if cli.json {
+                            print_json(&serde_json::json!({
+                                "schema": "cercis.cli/1",
+                                "ok": true,
+                                "aligned": d.is_empty(),
+                                "diff": d,
+                            }));
+                        } else if d.is_empty() {
+                            println!("期望状态与实际状态一致（{} 个想装的都在位）。", desired.install.len());
+                        } else {
+                            println!("期望状态对账（只算账，不动文件）：");
+                            for w in &d.missing {
+                                println!("  ＋ 要装：{}（市场 {}）", w.id, w.market);
+                            }
+                            for id in &d.extra {
+                                println!("  － 多余（可删）：{id}");
+                            }
+                            for id in &d.to_disable {
+                                println!("  ⏸ 要停用：{id}");
+                            }
+                            for id in &d.to_block {
+                                println!("  ⛔ 要屏蔽：{id}");
+                            }
+                            for id in &d.to_enable {
+                                println!("  ▶ 要启用：{id}");
+                            }
+                            for id in &d.to_unblock {
+                                println!("  ◻ 要取消屏蔽：{id}");
+                            }
+                            for n in &d.notes {
+                                println!("  · {n}");
+                            }
+                            println!("\n对齐：`cercis plugins <项目> reconcile`（装/删要 app 下载或 --from <目录>）");
+                        }
+                        Ok(())
+                    }
+                    PluginsAction::Reconcile(x) => {
+                        let Some(desired) = cercis_core::Desired::load_optional(&a.path)? else {
+                            return Err(CercisError::NotFound(format!(
+                                "{} 不存在——先写一份（--write <文件>）",
+                                cercis_core::desired::DESIRED_FILE
+                            )));
+                        };
+                        let installs = cercis_core::Installs::load(&global_dir_plugins()?)?;
+                        let mut state = cercis_core::plugin::PluginState::load(&a.path)?;
+                        let known: Vec<String> = found.iter().map(|p| p.manifest.id.clone()).collect();
+                        let d = cercis_core::desired::diff(&desired, &installs, &state, &known);
+
+                        // 1) 内核自己能做完的：改停用/屏蔽（都要留痕）
+                        let mut applied: Vec<String> = Vec::new();
+                        for id in &d.to_disable {
+                            applied.push(format!("停用 {id}"));
+                        }
+                        for id in &d.to_block {
+                            applied.push(format!("屏蔽 {id}"));
+                        }
+                        for id in &d.to_unblock {
+                            applied.push(format!("取消屏蔽 {id}"));
+                        }
+                        for id in &d.to_enable {
+                            applied.push(format!("启用 {id}"));
+                        }
+                        if !x.dry_run && !applied.is_empty() {
+                            for id in &d.to_disable {
+                                state.disable(id);
+                            }
+                            for id in &d.to_block {
+                                state.block(id);
+                            }
+                            for id in &d.to_unblock {
+                                state.unblock(id);
+                            }
+                            for id in &d.to_enable {
+                                state.enable(id);
+                            }
+                            state.save(&a.path)?;
+                            let p = Project::open(&a.path, None)?;
+                            p.store.append_change(&ChangeEntry::new(
+                                &p.store.identity.user_id,
+                                &p.store.identity.device_for_log(),
+                                "reconcile",
+                                "plugin",
+                                "",
+                                &format!("按期望状态对齐：{}", applied.join("、")),
+                                "",
+                                "",
+                            ))?;
+                        }
+
+                        // 2) 装：只有给了 --from 才动手（内核不联网）
+                        let mut installed: Vec<String> = Vec::new();
+                        let mut skipped: Vec<String> = Vec::new();
+                        if let Some(from) = &x.from {
+                            let listing = if from.join("marketplace.json").is_file() {
+                                from.join("marketplace.json")
+                            } else {
+                                from.join("marketplace.yaml")
+                            };
+                            let market_data = cercis_core::Marketplace::load(&listing)?;
+                            for w in &d.missing {
+                                // 只按"清单里有没有这个插件"判断，不拿市场名去猜——
+                                // 用户给的 --from 是哪份清单，就按哪份清单装
+                                let Some(entry) = market_data.plugin(&w.id) else {
+                                    skipped.push(format!(
+                                        "{} 不在这份市场清单里（{}），跳过",
+                                        w.id,
+                                        market_data.summary()
+                                    ));
+                                    continue;
+                                };
+                                let src = from.join(&entry.path);
+                                if !src.is_dir() {
+                                    continue;
+                                }
+                                if x.dry_run {
+                                    installed.push(format!("会装 {} v{}", entry.id, entry.version));
+                                    continue;
+                                }
+                                let repo = if market_data.repository.is_empty() {
+                                    from.display().to_string()
+                                } else {
+                                    market_data.repository.clone()
+                                };
+                                let git_ref = if w.git_ref.is_empty() { "main" } else { &w.git_ref };
+                                cercis_core::market::install_from_dir(
+                                    &src,
+                                    &global_dir_plugins()?,
+                                    &w.market,
+                                    &repo,
+                                    git_ref,
+                                    market_data.bundled,
+                                )?;
+                                installed.push(format!("装好 {} v{}", entry.id, entry.version));
+                            }
+                        }
+
+                        if cli.json {
+                            print_json(&serde_json::json!({
+                                "schema": "cercis.cli/1",
+                                "ok": true,
+                                "dry_run": x.dry_run,
+                                "diff": d,
+                                "applied": applied,
+                                "installed": installed,
+                                "skipped": skipped,
+                            }));
+                        } else {
+                            let mark = if x.dry_run { "会" } else { "✓" };
+                            if applied.is_empty() && installed.is_empty() && d.missing.is_empty() {
+                                println!("已经对齐，没有要做的。");
+                            } else {
+                                for a in &applied {
+                                    println!("{mark} {a}");
+                                }
+                                for i in &installed {
+                                    println!("{mark} {i}");
+                                }
+                                if x.dry_run && !applied.is_empty() {
+                                    println!("（试运行：没有动任何文件）");
+                                }
+                            }
+                            for s in &skipped {
+                                println!("  ! {s}");
+                            }
+                            for w in &d.missing {
+                                if x.from.is_none() {
+                                    println!("  ＋ 还要装：{}（市场 {}）——app 下载后装，或加 --from <已下载目录>", w.id, w.market);
+                                }
+                            }
+                            for id in &d.extra {
+                                println!("  － 多余（可删）：{id}（`cercis market uninstall --id {id}`）");
+                            }
+                            for n in &d.notes {
+                                println!("  · {n}");
+                            }
                         }
                         Ok(())
                     }
@@ -2466,6 +2714,68 @@ fn market_cmd(a: &MarketArgs, json_out: bool) -> Result<(), CercisError> {
                     }
                     Ok(())
                 }
+                MarketAction::Check { from, only_updates } => {
+                    let listing = if from.join("marketplace.json").is_file() {
+                        from.join("marketplace.json")
+                    } else {
+                        from.join("marketplace.yaml")
+                    };
+                    let market_data = cercis_core::Marketplace::load(&listing)?;
+                    let global_dir = global_dir.clone();
+                    let installs = cercis_core::Installs::load(&global_dir)?;
+                    let mut items = cercis_core::market::check_updates(&installs, &market_data);
+                    if *only_updates {
+                        items.retain(|i| i.actionable());
+                    }
+                    if json_out {
+                        print_json(&serde_json::json!({
+                            "schema": "cercis.cli/1",
+                            "ok": true,
+                            "market": market_data.summary(),
+                            "updates": items,
+                        }));
+                    } else if items.is_empty() {
+                        println!("没有可检查的插件（这个市场里没有你装过的插件）。");
+                    } else {
+                        println!("更新检查：{}（只提示，不自动升级）", market_data.summary());
+                        for i in &items {
+                            let line = match i.status.as_str() {
+                                "update_available" => format!(
+                                    "↑ {}：{} → {}{}",
+                                    i.id,
+                                    i.installed_version,
+                                    i.available_version,
+                                    if i.needs_reconfirmation {
+                                        "（**权限有变化：升级前要重新确认**）"
+                                    } else {
+                                        ""
+                                    }
+                                ),
+                                "up_to_date" => format!("= {}：已是最新（{}）", i.id, i.installed_version),
+                                "newer_installed" => format!(
+                                    "· {}：本地版本更新（{} > {}），不提示降级",
+                                    i.id, i.installed_version, i.available_version
+                                ),
+                                "incompatible" => format!(
+                                    "! {}：市场里的新版本需要内核接口 {}（当前支持到 {}），先升级内核",
+                                    i.id,
+                                    i.requires_plugin_api,
+                                    cercis_core::plugin::PLUGIN_API_VERSION
+                                ),
+                                _ => format!("? {}：市场里没有这个插件了（已装 {}）", i.id, i.installed_version),
+                            };
+                            println!("  {line}");
+                        }
+                        let n = items.iter().filter(|i| i.actionable()).count();
+                        if n > 0 {
+                            println!(
+                                "\n共 {n} 个可更新。升级命令：`cercis market install --from {} --plugin <id> --ref <ref>`",
+                                from.display()
+                            );
+                        }
+                    }
+                    Ok(())
+                }
                 MarketAction::Restore {
                     id,
                     from,
@@ -2524,6 +2834,12 @@ fn market_cmd(a: &MarketArgs, json_out: bool) -> Result<(), CercisError> {
                 }
             }
         }
+
+
+/// 用户级插件目录（市场安装的插件放这里）：`CERCIS_GLOBAL_PLUGINS` > `~/.cercis/plugins`。
+fn global_dir_plugins() -> Result<PathBuf, CercisError> {
+    default_global_plugin_dir()
+}
 
 /// 用户级插件目录（市场安装的插件放这里）：`--global-dir` > `CERCIS_GLOBAL_PLUGINS` > `~/.cercis/plugins`。
 fn default_global_plugin_dir() -> Result<PathBuf, CercisError> {

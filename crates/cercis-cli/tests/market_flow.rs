@@ -116,18 +116,18 @@ fn validate_accepts_good_market_and_rejects_bad_ones() {
     let out = ok(&["market", "validate", "--file", &f, "--json"], &[]);
     assert_eq!(out["marketplace"]["plugins"].as_array().unwrap().len(), 2);
 
-    // 坏清单：接口版本要求高于内核
-    let bad = dir.join("bad1.json");
+    // 某个插件要求的接口版本高于内核：**整份市场仍然可读**（同市场里别的插件照常可用），
+    // 只是那一条装不上——装载/升级时会被拦下（见 check_updates 的 incompatible）
+    let newer = dir.join("newer.json");
     std::fs::write(
-        &bad,
+        &newer,
         std::fs::read_to_string(&file)
             .unwrap()
             .replace("\"requires_plugin_api\": 1", "\"requires_plugin_api\": 99"),
     )
     .unwrap();
-    let (code, _o, err) = run(&["market", "validate", "--file", &bad.display().to_string()], &[]);
-    assert_ne!(code, 0);
-    assert!(err.contains("需要接口版本"), "{err}");
+    let (code, _o, _e) = run(&["market", "validate", "--file", &newer.display().to_string()], &[]);
+    assert_eq!(code, 0, "不能因为一个插件太新就让整份市场读不出来");
 
     // 坏清单：路径跑到仓库外面
     let bad2 = dir.join("bad2.json");
