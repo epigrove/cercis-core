@@ -85,6 +85,12 @@ enum Command {
     Market(MarketArgs),
     /// 加密共享与分权：成员、加密区域、解锁、解密导出（S11）
     Share(ShareArgs),
+    /// 打包带走：全量/增量/分卷（加密区域保持密文；S12）
+    Pack(PackArgs),
+    /// 合并一个包：并集 + 冲突副本 + 校验先过（S12）
+    Merge(MergeArgs),
+    /// 分享守卫：扫一遍"能不能发出去"（白名单 + 真实数据拦截 + 隐私清单；S12）
+    Guard(GuardArgs),
     /// 内核信息
     Version,
 }
@@ -484,6 +490,63 @@ enum MarketAction {
         #[arg(long = "ref", default_value = "")]
         git_ref: String,
     },
+}
+
+#[derive(Args, Debug)]
+struct GuardArgs {
+    /// 要扫描的目录（工具仓库、准备分享的文件夹……）
+    path: PathBuf,
+    /// 顺手按白名单打出分享包（有拒绝项就直接不干）
+    #[arg(long)]
+    pack: Option<PathBuf>,
+    /// 手动放行的路径规则（可重复，如 --allow 'examples/**'）
+    #[arg(long = "allow", value_name = "规则")]
+    allow: Vec<String>,
+    /// 自定义敏感关键词（可重复，如 --keyword 未公开配方）
+    #[arg(long = "keyword", value_name = "词")]
+    keywords: Vec<String>,
+    /// 跳过隐私文本扫描
+    #[arg(long)]
+    no_privacy: bool,
+}
+
+#[derive(Args, Debug)]
+struct PackArgs {
+    /// 项目目录
+    path: PathBuf,
+    /// 输出目录（**不能放在项目里面**，否则会把包自己装进包里）
+    #[arg(long)]
+    out: PathBuf,
+    /// 每卷上限（MB，默认 20，适配微信；0 = 整包一卷）
+    #[arg(long, default_value_t = 20)]
+    part_size_mb: u64,
+    /// 增量打包：上一次的 pack.json（或包含它的目录）
+    #[arg(long)]
+    since: Option<PathBuf>,
+    /// 不装历史快照（history/objects；默认装，跨设备也能回溯）
+    #[arg(long)]
+    no_history: bool,
+    /// 连检查点一起装（history/checkpoints；默认不装，与对象库重复）
+    #[arg(long)]
+    with_checkpoints: bool,
+    /// 只看会装什么，不落盘
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+struct MergeArgs {
+    /// 包目录（里面有 pack.json 与 part-* 卷）
+    pack: PathBuf,
+    /// 合并到哪个项目（本地文件永不被覆盖）
+    #[arg(long)]
+    into: PathBuf,
+    /// 用哪个成员的会话（合并加密区域里的表要用；不给就用当前解锁的成员）
+    #[arg(long)]
+    member: Option<String>,
+    /// 只看会发生什么，不动磁盘
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1953,6 +2016,9 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
 
         Command::Market(a) => market_cmd(a, cli.json)?,
         Command::Share(a) => share_cmd(a, cli.json)?,
+        Command::Pack(a) => pack_cmd(a, cli.json)?,
+        Command::Merge(a) => merge_cmd(a, cli.json)?,
+        Command::Guard(a) => guard_cmd(a, cli.json)?,
 
         Command::Validate(a) => {
             let p = Project::open(&a.path, None)?;
@@ -2646,6 +2712,227 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
             } else {
                 println!("已还原到 {}", a.to.display());
             }
+        }
+    }
+    Ok(())
+}
+
+/// 分享守卫（S12 / FR-I04–I05）：白名单 + 真实数据拦截 + 隐私清单。
+fn guard_cmd(a: &GuardArgs, json_out: bool) -> Result<(), CercisError> {
+    use cercis_core::guard::{self, GuardOptions};
+
+    let opts = GuardOptions {
+        allow: a.allow.clone(),
+        keywords: a.keywords.clone(),
+        scan_privacy: !a.no_privacy,
+    };
+    let rep = match &a.pack {
+        Some(out) => guard::pack_share(&a.path, out, &opts)?,
+        None => guard::scan(&a.path, &opts)?,
+    };
+
+    if json_out {
+        print_json(&serde_json::json!({
+            "schema": "cercis.cli/1",
+            "ok": rep.is_shareable(),
+            "verdict": rep.verdict,
+            "synthetic": rep.synthetic,
+            "allowed": rep.allowed,
+            "to_review": rep.to_review,
+            "refused": rep.refused,
+            "skipped": rep.skipped,
+            "files": rep.files,
+            "privacy": rep.privacy,
+            "notes": rep.notes,
+            "packed_to": a.pack.as_ref().map(|p| p.display().to_string()),
+        }));
+    } else {
+        println!(
+            "分享守卫：{}（放行 {} / 待确认 {} / 拒绝 {} / 跳过 {}）",
+            match rep.verdict.as_str() {
+                "ok" => "可以分享",
+                "review" => "需要人工确认",
+                _ => "不能分享：发现真实数据类文件",
+            },
+            rep.allowed,
+            rep.to_review,
+            rep.refused,
+            rep.skipped
+        );
+        for f in rep.files.iter().filter(|f| f.class == "refuse") {
+            println!("  拒绝：{}（{}）", f.path, f.reason);
+        }
+        for f in rep.files.iter().filter(|f| f.class == "review") {
+            println!("  待确认：{}（{}）", f.path, f.reason);
+        }
+        if !rep.privacy.is_empty() {
+            println!("\n隐私线索（请人工过目）：");
+            for p in rep.privacy.iter().take(20) {
+                println!("  {}：{} → {}", p.path, p.kind, p.sample);
+            }
+            if rep.privacy.len() > 20 {
+                println!("  ……还有 {} 条", rep.privacy.len() - 20);
+            }
+        }
+        for n in &rep.notes {
+            println!("注：{n}");
+        }
+        if let Some(out) = &a.pack {
+            println!("\n分享包：{}（清单见 share-manifest.json）", out.display());
+        } else {
+            println!("\n要直接把白名单内容打成分享包：cercis guard <目录> --pack <输出目录>");
+        }
+    }
+    Ok(())
+}
+
+/// 打包带走（S12）：全量 / 增量 / 分卷；加密区域保持密文。
+fn pack_cmd(a: &PackArgs, json_out: bool) -> Result<(), CercisError> {
+    use cercis_core::pack::{self, PackOptions};
+
+    let opts = PackOptions {
+        part_size: a.part_size_mb.saturating_mul(1024 * 1024),
+        since: a.since.clone(),
+        include_history: !a.no_history,
+        with_checkpoints: a.with_checkpoints,
+        dry_run: a.dry_run,
+    };
+    if !a.dry_run {
+        std::fs::create_dir_all(&a.out)?;
+    }
+    let rep = pack::pack(&a.path, &a.out, &opts)?;
+
+    if json_out {
+        print_json(&serde_json::json!({
+            "schema": "cercis.cli/1",
+            "ok": true,
+            "dry_run": rep.dry_run,
+            "out": rep.out,
+            "parts": rep.parts,
+            "files": rep.files,
+            "bytes": rep.bytes,
+            "skipped_unchanged": rep.skipped_unchanged,
+            "removed": rep.removed,
+            "notes": rep.notes,
+            "watermark": {
+                "change_count": rep.manifest.watermark.change_count,
+                "last_change_at": rep.manifest.watermark.last_change_at,
+            },
+            "state_hash": rep.manifest.state_hash,
+        }));
+    } else if a.dry_run {
+        println!(
+            "试运行：会把 {} 个文件（{} 字节）装进 {}，分成 {} 卷{}",
+            rep.files,
+            rep.bytes,
+            rep.out,
+            rep.parts.len(),
+            if rep.skipped_unchanged > 0 {
+                format!("（其中 {} 个没变、跳过）", rep.skipped_unchanged)
+            } else {
+                String::new()
+            }
+        );
+    } else {
+        println!(
+            "已打包：{} 个文件（{} 字节）→ {}，共 {} 卷",
+            rep.files,
+            rep.bytes,
+            rep.out,
+            rep.parts.len()
+        );
+        if rep.parts.len() > 1 {
+            println!("  卷：{}", rep.parts.join(" / "));
+        }
+        if rep.skipped_unchanged > 0 {
+            println!("  增量：{} 个文件没变，跳过", rep.skipped_unchanged);
+        }
+        if !rep.removed.is_empty() {
+            println!(
+                "  相比上一包，源项目里少了 {} 个文件（只记录，不代删）：{}",
+                rep.removed.len(),
+                rep.removed.join("、")
+            );
+        }
+        println!("  清单：{}", a.out.join("pack.json").display());
+        println!("  变更水位：{} 条（最后一条 {}）", rep.manifest.watermark.change_count, rep.manifest.watermark.last_change_at);
+        for n in &rep.notes {
+            println!("  注：{n}");
+        }
+        println!("\n在另一台设备上合并：cercis merge {} --into <那边的项目>", a.out.display());
+    }
+    Ok(())
+}
+
+/// 合并一个包（S12）：先校验，再并集；冲突留双方副本；本地文件永不被覆盖。
+fn merge_cmd(a: &MergeArgs, json_out: bool) -> Result<(), CercisError> {
+    use cercis_core::pack::{self, MergeOptions};
+
+    let opts = MergeOptions {
+        dry_run: a.dry_run,
+        member: a.member.clone(),
+    };
+    let rep = pack::merge(&a.pack, &a.into, &opts)?;
+
+    if json_out {
+        print_json(&serde_json::json!({
+            "schema": "cercis.cli/1",
+            "ok": true,
+            "dry_run": rep.dry_run,
+            "project": rep.project_name,
+            "verified": rep.verified,
+            "added": rep.added,
+            "merged": rep.merged,
+            "conflicts": rep.conflicts,
+            "unchanged": rep.unchanged,
+            "refused": rep.refused,
+            "removed_reported": rep.removed_reported,
+            "report_path": rep.report_path,
+            "notes": rep.notes,
+            "summary": rep.summary(),
+        }));
+    } else {
+        println!("{}", rep.summary());
+        if rep.dry_run {
+            println!("（试运行：磁盘上没有改动）");
+        }
+        for m in &rep.merged {
+            println!(
+                "  并集：{} 新增 {} 行{}{}",
+                m.table,
+                m.added_rows,
+                if m.added_columns.is_empty() {
+                    String::new()
+                } else {
+                    format!("，新增列 {}", m.added_columns.join("、"))
+                },
+                if m.encrypted { "（加密区域）" } else { "" }
+            );
+            if !m.key_conflicts.is_empty() {
+                println!(
+                    "    ⚠ 同一编号有两份不同内容（都留着，请人工核对）：{}",
+                    m.key_conflicts.join("、")
+                );
+            }
+        }
+        for c in &rep.conflicts {
+            println!("  冲突：{} → 对方那份留成 {}", c.path, c.wrote);
+        }
+        for r in &rep.refused {
+            println!("  没动：{r}");
+        }
+        if !rep.removed_reported.is_empty() {
+            println!(
+                "  对方删掉了 {} 个文件（本工具没有替你删）：{}",
+                rep.removed_reported.len(),
+                rep.removed_reported.join("、")
+            );
+        }
+        if !rep.report_path.is_empty() {
+            println!("\n报告：{}", rep.report_path);
+        }
+        for n in &rep.notes {
+            println!("注：{n}");
         }
     }
     Ok(())

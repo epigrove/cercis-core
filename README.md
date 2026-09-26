@@ -22,13 +22,15 @@ Cercis 内核：**行业普适的"文件夹即数据库"引擎**。
 - [x] 插件协议（清单、权限、界面扩展点、信任绑定内容指纹）
 - [x] **加密共享与分权**（S11）：加密区域（磁盘即密文）、账号口令解锁、成员密钥封装、
   换密钥重加密、历史快照一并加密、解密导出留痕（`cercis share …`）
+- [x] **搬运与合并**（S12）：打包（全量/增量/分卷，加密区域保持密文）、并集合并
+  （冲突留双方副本、本地永不覆盖、校验先过）、分享守卫（白名单 + 合成标记 + 隐私清单）
 - [x] 命令行（`cercis`，含 `--json`）
 
 ## 构建与测试（作者自测）
 
 ```bash
 cd kernel
-cargo test          # 运行测试（133 个：100 单元 + 33 端到端/集成，其中 S11 加密 10 个）
+cargo test          # 运行测试（153 个：110 单元 + 43 端到端/集成，其中 S11 加密 10 个、S12 打包合并 10 个）
 cargo build         # 构建内核与命令行
 cargo run -p cercis-cli -- --help
 ```
@@ -60,6 +62,13 @@ cercis share status <目录>                                     # 区域、密�
 cercis share export <目录> --zone secret                       # 解密导出到 exports/ 给 R / AI 用（留痕）
 cercis share revoke <目录> --zone secret --member bob --as alice  # 移除成员：换密钥 + 重新加密
 cercis share lock <目录>                                       # 上锁（--forget 连钥匙串口令一起删）
+
+# 搬运与合并（S12）：打包带走、回来并集合并；分享守卫守住"发布零数据"
+cercis pack <目录> --out /tmp/我的包 --part-size-mb 20            # 打包（每卷 20 MB，适配微信）
+cercis pack <目录> --out /tmp/增量包 --since /tmp/我的包/pack.json  # 增量：只装变化的文件
+cercis merge /tmp/我的包 --into <另一台设备上的项目>               # 合并：并集；冲突留双方副本；本地永不被覆盖
+cercis guard . --json                                            # 分享前扫一遍：白名单/真实数据/隐私线索
+cercis guard . --pack /tmp/发布包                                 # 按白名单打出分享包（有拒绝项就直接不干）
 ```
 
 > 加密细节（算法、文件格式、密钥世代、历史快照迁移）见需求文档 §12.5.1 与 D47–D49；
