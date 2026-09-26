@@ -79,6 +79,8 @@ enum Command {
     Plugins(PluginsArgs),
     /// 信任项目内插件（绑定内容指纹）
     Trust(TrustArgs),
+    /// 删掉一张**空表**（换模板后残留的空表清理；有数据会拒绝）
+    DropTable(DropTableArgs),
     /// 插件市场：看预置市场、校验清单、从已下载的目录安装、卸载
     Market(MarketArgs),
     /// 内核信息
@@ -366,6 +368,18 @@ struct TrustArgs {
     /// 撤销信任（默认是授予信任）
     #[arg(long)]
     revoke: bool,
+}
+
+#[derive(Args, Debug)]
+struct DropTableArgs {
+    /// 项目目录
+    path: PathBuf,
+    /// 表名（不含 .csv）
+    #[arg(long)]
+    table: String,
+    /// 只看会删什么
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1691,6 +1705,55 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                 println!("  权限：{}", target.manifest.permission_summary());
                 println!("  指纹：{}", target.fingerprint);
                 println!("（内容一旦变化，信任将自动失效）");
+            }
+        }
+
+        Command::DropTable(a) => {
+            let p = Project::open(&a.path, None)?;
+            if a.dry_run {
+                let path = p.root().join("tables").join(format!("{}.csv", a.table));
+                if !path.exists() {
+                    return Err(CercisError::NotFound(format!("表不存在：{}", a.table)));
+                }
+                let t = cercis_core::Table::load(&path)?;
+                if !t.rows.is_empty() {
+                    return Err(CercisError::Invalid(format!(
+                        "表 {} 里已有 {} 行数据——只删空表",
+                        a.table,
+                        t.rows.len()
+                    )));
+                }
+                if cli.json {
+                    print_json(&serde_json::json!({
+                        "schema": "cercis.cli/1",
+                        "ok": true,
+                        "dry_run": true,
+                        "table": a.table,
+                        "message": format!("会删掉空表 {}（并把它从模板里去掉）", a.table),
+                    }));
+                } else {
+                    println!("试运行：会删掉空表 {}（并把它从模板里去掉）", a.table);
+                    println!("（去掉 --dry-run 才真正删除；删除动作会写进流水）");
+                }
+                return Ok(());
+            }
+            let (table, from_template) = p.drop_empty_table(&a.table)?;
+            if cli.json {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "table": table,
+                    "removed_from_template": from_template,
+                }));
+            } else {
+                println!(
+                    "已删掉空表 {table}{}",
+                    if from_template {
+                        "（也从模板里移除了）"
+                    } else {
+                        ""
+                    }
+                );
             }
         }
 

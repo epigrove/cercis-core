@@ -276,6 +276,56 @@ impl Project {
         Ok((next, describe))
     }
 
+    /// 删掉一张**空表**（F-05：换模板后残留的空表要有个干净的清理通道）。
+    ///
+    /// 规矩：**只删空表**——表里只要有数据就拒绝（数据只增不改，删数据得走更正/回滚）。
+    /// 顺带把它从模板里去掉（模板里没有这张表时不动模板）。
+    /// 返回（删掉的表名，是否也从模板里去掉）。
+    pub fn drop_empty_table(&self, table: &str) -> Result<(String, bool)> {
+        let path = self.root.join("tables").join(format!("{table}.csv"));
+        if !path.exists() {
+            return Err(CercisError::NotFound(format!("表不存在：{table}")));
+        }
+        let t = crate::table::Table::load(&path)?;
+        if !t.rows.is_empty() {
+            return Err(CercisError::Invalid(format!(
+                "表 {table} 里已有 {} 行数据——只删空表；要处理数据请用更正或检查点回滚",
+                t.rows.len()
+            )));
+        }
+        std::fs::remove_file(&path)?;
+        // 模板里若声明了这张表，一并去掉（否则体检会报"模板要求的列在表中缺失"）
+        let mut removed_from_template = false;
+        if let Ok(Some(tpl)) = self.store.load_template() {
+            if tpl.table(table).is_some() {
+                let mut next = tpl.clone();
+                next.tables.retain(|x| x.name != table);
+                if next.validate().is_ok() {
+                    self.store.save_template(&next)?;
+                    removed_from_template = true;
+                }
+            }
+        }
+        self.store.append_change(&crate::history::ChangeEntry::new(
+            &self.store.identity.user_id,
+            &self.store.identity.device_for_log(),
+            "drop",
+            table,
+            table,
+            &format!(
+                "删掉空表 {table}{}（表里没有数据，符合「只删空表」的规矩）",
+                if removed_from_template {
+                    "，并已从模板中移除"
+                } else {
+                    ""
+                }
+            ),
+            "",
+            "",
+        ))?;
+        Ok((table.to_string(), removed_from_template))
+    }
+
     /// 创建检查点（文件级备份）。
     pub fn checkpoint(&self, note: &str) -> Result<PathBuf> {
         let mut files = Vec::new();

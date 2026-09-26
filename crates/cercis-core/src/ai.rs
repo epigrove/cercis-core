@@ -117,6 +117,7 @@ impl AiContract {
             cmd("cercis correct <项目> --table <表> --target <编号> --field <列> --old <旧值> --new <新值>", "记录更正（不覆盖原值）", "cercis correct ./项目 --table records --target R-0001 --field value_num --old 12.5 --new 12.7 --reason '笔误'"),
             cmd("cercis note <项目> --action <动作> --summary <说明>", "记一条流水（导出等动作留痕）", "cercis note ./项目 --action export --summary '导出 observations 到 /tmp/out.csv' --source-ref /tmp/out.csv"),
             cmd("cercis plugins <项目>", "看插件：是否生效、为什么没生效、有没有键冲突、有没有撤不回去的登记", "cercis plugins ./项目 --json"),
+            cmd("cercis drop-table <项目> --table <表>", "删掉一张空表（换模板后残留的空表清理；有数据的表会被拒绝）", "cercis drop-table ./项目 --table records --dry-run"),
             cmd("cercis plugins <项目> register --plugin <ID> --kind <KIND> --target <目标>", "插件登记自己对项目结构的增改（停用时按倒序回滚）", "cercis plugins ./项目 register --plugin demo_io --kind column --target observations.spad_note"),
             cmd("cercis plugins <项目> disable --id <ID>", "停用插件并回滚它的登记（先加 --dry-run 看会撤什么）", "cercis plugins ./项目 disable --id demo_io --dry-run"),
             cmd("cercis plugins <项目> block --id <ID>", "屏蔽插件（比停用更彻底：不加载、界面不出现、命令不执行；随时 unblock）", "cercis plugins ./项目 block --id demo_io"),
