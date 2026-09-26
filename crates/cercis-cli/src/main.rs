@@ -2373,6 +2373,26 @@ fn market_cmd(a: &MarketArgs, json_out: bool) -> Result<(), CercisError> {
                         ))
                     })?;
                     let src = from.join(&entry.path);
+                    if !src.is_dir() {
+                        // 手写 marketplace.json 最容易错的就是插件路径：把仓库实际结构列出来
+                        let listing: Vec<String> = std::fs::read_dir(from)
+                            .map(|it| {
+                                it.flatten()
+                                    .filter(|e| e.path().is_dir() && e.file_name() != ".git")
+                                    .map(|e| format!("{}/", e.file_name().to_string_lossy()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        return Err(CercisError::NotFound(format!(
+                            "清单里写的插件路径是 {}，但仓库里没有这个目录（仓库根下有：{}）",
+                            entry.path,
+                            if listing.is_empty() {
+                                "（空）".to_string()
+                            } else {
+                                listing.join(" ")
+                            }
+                        )));
+                    }
                     if *dry_run {
                         if json_out {
                             print_json(&serde_json::json!({
