@@ -122,6 +122,9 @@ impl Project {
         id.record_device = config.identity.record_device;
 
         let store = Store::new(&root, id);
+        let mut store = store;
+        // 加密区域：若这个项目已经解锁过，会话里的成员自动生效（读密文时透明解密）
+        store.set_access_member(crate::access::current_member(&root));
         Ok(Self {
             root,
             config,
@@ -145,6 +148,8 @@ impl Project {
         for r in removed {
             issues.push(format!("清理残留临时文件: {}", r.display()));
         }
+        // 加密区域：明文残留、未解锁提示
+        issues.extend(crate::access::doctor_issues(&self.root)?);
         Ok(issues)
     }
 
@@ -403,8 +408,29 @@ const HISTORY_README: &str = r#"# 历史（history/）
 
 const ACCESS_README: &str = r#"# 身份与鉴权（access/）
 
+- `members.yaml`：加密共享的成员名单（**只有公钥**，没有口令、没有私钥明文）
+- `members/<成员>.key`：成员私钥文件——用他自己的口令（Argon2id）加密过
+- `zones.yaml`：加密区域定义（区域名、路径规则、成员授权、被封装的内容密钥）
+- `keyrings/<区域>.yaml`：历史密钥世代（换密钥后留档，用于解旧密文与回滚）
 - `accounts.yaml`：NAS 多人编辑时启用；只存加盐哈希，不存明文口令
-- `zones.yaml`：加密区域定义（区域名、路径规则、授权成员、密钥封装）
+
+## 加密区域怎么用（命令行）
+
+```bash
+cercis share member-add <项目> --id alice --name 张老师      # 建成员（会让你输入口令）
+cercis share zone-create <项目> --name patent-data --paths 'methods/配方/**' --member alice:admin
+cercis share unlock <项目> --member alice                   # 解锁（口令可交给系统钥匙串记住）
+cercis share status <项目>                                  # 看有哪些区域、谁在里面、有没有明文残留
+cercis share export <项目> --zone patent-data               # 解密导出到 exports/ 给 R / AI 用
+cercis share lock <项目>                                    # 上锁（清掉本机会话）
+```
+
+要点：
+
+- **默认不加密**：只有被划进加密区域的文件在磁盘上才是密文（`.enc`），其余保持 CSV 开放。
+- 区域名、路径规则与**文件名**在磁盘上可见，**内容**不可见；app 内对未授权成员不显示这些条目。
+- 忘记口令**无法找回**：只能由管理员重新授权一个新的成员身份。
+- 移除成员会自动**换密钥并重加密**；被移除者从此刻起读不到新内容（他之前看过的无法追回）。
 
 > 分享包与开源发布默认**不包含**本目录。
 "#;

@@ -76,6 +76,8 @@ pub struct Store {
     root: std::path::PathBuf,
     objects: ObjectStore,
     pub identity: Identity,
+    /// 当前生效的加密共享成员（`share unlock` 后自动带上；None = 没解锁）。
+    access_member: Option<String>,
 }
 
 impl Store {
@@ -85,26 +87,59 @@ impl Store {
             objects: ObjectStore::new(root.join("history")),
             root,
             identity,
+            access_member: None,
         }
+    }
+
+    /// 指定当前生效的成员（加密区域用它判断"你是谁、能读能写哪些区域"）。
+    pub fn with_access_member(mut self, member: Option<String>) -> Self {
+        self.access_member = member;
+        self
+    }
+
+    /// 同上，用于已经建好的 `Store`。
+    pub fn set_access_member(&mut self, member: Option<String>) {
+        self.access_member = member;
+    }
+
+    pub fn access_member(&self) -> Option<&str> {
+        self.access_member.as_deref()
     }
 
     pub fn root(&self) -> &std::path::Path {
         &self.root
     }
 
-    fn tables_dir(&self) -> std::path::PathBuf {
-        self.root.join("tables")
-    }
-
     /// 载入一张表（不存在则按给定列创建）。
     ///
     /// 若表不存在且未提供列定义，返回可读错误（而不是创建一张无列名的表）。
     pub fn load_table(&self, name: &str, columns: &[&str]) -> Result<Table> {
-        let path = self.tables_dir().join(format!("{name}.csv"));
+        let rel = format!("tables/{name}.csv");
+        let path = self.root.join(&rel);
+
+        // 加密区域：磁盘上是密文，读取时透明解密（未解锁会给出可操作提示）。
+        match crate::access::read_through_zone(&self.root, self.access_member.as_deref(), &rel)? {
+            Some(bytes) => {
+                let text = String::from_utf8(bytes).map_err(|e| {
+                    CercisError::Corrupt(format!("加密表解密后不是 UTF-8：{rel}（{e}）"))
+                })?;
+                return Table::from_csv_text(&path, &text);
+            }
+            None => {}
+        }
+
         if !path.exists() && columns.is_empty() {
             return Err(CercisError::NotFound(format!(
                 "表不存在: {name}（可先写入一行以创建，或由模板提供列定义）"
             )));
+        }
+        // 区域内还没落盘的新表：只在内存里建（明文不许落到磁盘上）
+        if !path.exists()
+            && crate::access::zone_covering(&self.root, &rel)?.is_some()
+        {
+            let t = Table::in_memory(&path, columns);
+            t.validate_structure()?;
+            return Ok(t);
         }
         Table::load_or_create(path, columns)
     }
@@ -114,19 +149,22 @@ impl Store {
     /// - `action`：create / update / restore ……
     /// - `summary`：一句话说明（写入流水）
     pub fn save_table(&self, table: &Table, action: &str, summary: &str) -> Result<String> {
-        let before = crate::tx::read_optional(table.path())?;
+        let before = self.read_stored(table.path())?;
         let hash_before = before
             .as_ref()
-            .map(|t| ObjectStore::hash_bytes(t.as_bytes()))
+            .map(|b| ObjectStore::hash_bytes(b))
             .unwrap_or_default();
 
         if let Some(prev) = before.as_ref() {
-            self.objects.put(prev.as_bytes())?; // 保留旧状态
+            self.objects.put(prev)?; // 保留旧状态（加密区域内保留的是密文）
         }
 
         let after_text = table.to_csv_text();
-        let hash_after = self.objects.put(after_text.as_bytes())?;
-        table.save()?;
+        self.write_table_text(table, &after_text)?;
+        let after = self.read_stored(table.path())?.ok_or_else(|| {
+            CercisError::Corrupt(format!("写入后读不到表内容：{}", table.path().display()))
+        })?;
+        let hash_after = self.objects.put(&after)?;
 
         let table_name = table
             .path()
@@ -146,6 +184,39 @@ impl Store {
         ))?;
 
         Ok(hash_after)
+    }
+
+    /// 读取"文件当前实际存着的东西"：加密区域里的表就是密文。
+    fn read_stored(&self, path: &std::path::Path) -> Result<Option<Vec<u8>>> {
+        if let Some(text) = crate::tx::read_optional(path)? {
+            return Ok(Some(text.into_bytes()));
+        }
+        let enc = crate::access::enc_path(path);
+        if enc.exists() {
+            return Ok(Some(std::fs::read(&enc)?));
+        }
+        Ok(None)
+    }
+
+    /// 写表：区域内的表加密落盘（明文不留），区域外就是普通 CSV。
+    fn write_table_text(&self, table: &Table, text: &str) -> Result<()> {
+        let rel = self.rel_of(table.path());
+        match crate::access::write_through_zone(
+            &self.root,
+            self.access_member.as_deref(),
+            &rel,
+            text.as_bytes(),
+        )? {
+            Some(_blob) => Ok(()),
+            None => crate::tx::write_atomic_str(table.path(), text),
+        }
+    }
+
+    /// 项目内的相对路径（统一用 `/` 分隔）。
+    fn rel_of(&self, path: &std::path::Path) -> String {
+        path.strip_prefix(&self.root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| path.to_string_lossy().to_string())
     }
 
     /// 追加一行到某张表，并留痕（最常用的写入路径）。
@@ -282,17 +353,20 @@ impl Store {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
-        let before = crate::tx::read_optional(table.path())?;
+        let before = self.read_stored(table.path())?;
         let hash_before = before
             .as_ref()
-            .map(|t| ObjectStore::hash_bytes(t.as_bytes()))
+            .map(|b| ObjectStore::hash_bytes(b))
             .unwrap_or_default();
         if let Some(prev) = before.as_ref() {
-            self.objects.put(prev.as_bytes())?;
+            self.objects.put(prev)?;
         }
         let after_text = table.to_csv_text();
-        let hash_after = self.objects.put(after_text.as_bytes())?;
-        table.save()?;
+        self.write_table_text(table, &after_text)?;
+        let after = self.read_stored(table.path())?.ok_or_else(|| {
+            CercisError::Corrupt(format!("写入后读不到表内容：{}", table.path().display()))
+        })?;
+        let hash_after = self.objects.put(&after)?;
 
         let mut entry = ChangeEntry::new(
             &self.identity.user_id,
@@ -487,7 +561,10 @@ impl Store {
         target: impl AsRef<std::path::Path>,
         summary: &str,
     ) -> Result<()> {
-        let text = self.objects.get_text(hash)?;
+        let bytes = self.read_object(hash)?;
+        let text = String::from_utf8(bytes).map_err(|e| {
+            CercisError::Corrupt(format!("历史对象不是合法 UTF-8: {hash}（{e}）"))
+        })?;
         crate::tx::write_atomic_str(target.as_ref(), &text)?;
         let name = target
             .as_ref()
@@ -505,5 +582,15 @@ impl Store {
             hash,
         ))?;
         Ok(())
+    }
+
+    /// 读取历史对象内容（加密区域里存的是密文，这里透明解密）。
+    ///
+    /// - 老指纹会先按 `access/zone-objects.yaml` 的台账换成密文对象指纹；
+    /// - 密文对象用当前会话里的区域钥匙解开（未解锁会给出可操作提示）。
+    pub fn read_object(&self, hash: &str) -> Result<Vec<u8>> {
+        let real = crate::access::resolve_object_hash(&self.root, hash)?;
+        let blob = self.objects.get(&real)?;
+        crate::access::decrypt_object(&self.root, self.access_member.as_deref(), &blob)
     }
 }

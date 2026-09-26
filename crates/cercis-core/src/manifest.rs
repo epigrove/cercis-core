@@ -26,6 +26,42 @@ pub struct TableEntry {
     pub rows: usize,
     pub sha256: String,
     pub bytes: u64,
+    /// 这张表在加密区域里（磁盘上是密文）
+    #[serde(default)]
+    pub encrypted: bool,
+    /// 在加密区域里、但当前没解锁（列与行数读不到）
+    #[serde(default)]
+    pub locked: bool,
+}
+
+/// 一个加密区域在清单里的样子（**未解锁时只报个数，不暴露名字**）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoneSummary {
+    pub name: String,
+    #[serde(default)]
+    pub label: String,
+    pub generation: u32,
+    pub key_fingerprint: String,
+    pub files: usize,
+    /// 当前会话成员在该区域的权限（未解锁时为空）
+    #[serde(default)]
+    pub permission: String,
+}
+
+/// 加密共享状态摘要（清单用）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AccessSummary {
+    pub members: usize,
+    /// 已解锁的成员（未解锁为空）
+    #[serde(default)]
+    pub unlocked_as: String,
+    /// 磁盘上共有多少个加密区域
+    pub zones_total: usize,
+    /// 未解锁时看不到区域名字，只报个数
+    #[serde(default)]
+    pub zones_locked: usize,
+    #[serde(default)]
+    pub zones: Vec<ZoneSummary>,
 }
 
 /// 项目清单。
@@ -54,6 +90,9 @@ pub struct Manifest {
     pub state_hash: String,
     /// 表清单
     pub tables: Vec<TableEntry>,
+    /// 加密共享状态（默认空 = 本项目没有加密区域）
+    #[serde(default)]
+    pub access: AccessSummary,
     /// 变更水位数（流水条数）
     #[serde(default)]
     pub change_count: usize,
@@ -74,25 +113,69 @@ impl Manifest {
             for e in std::fs::read_dir(&tables_dir)? {
                 let e = e?;
                 let p = e.path();
-                if p.extension().map(|x| x == "csv").unwrap_or(false) {
-                    if let Some(stem) = p.file_stem() {
-                        names.push(stem.to_string_lossy().to_string());
-                    }
+                let file_name = p.file_name().map(|s| s.to_string_lossy().to_string());
+                let Some(file_name) = file_name else { continue };
+                // 普通表：xxx.csv；加密区域里的表：xxx.csv.enc
+                if let Some(stem) = file_name.strip_suffix(".csv") {
+                    names.push(stem.to_string());
+                } else if let Some(stem) = file_name.strip_suffix(".csv.enc") {
+                    names.push(stem.to_string());
+                } else if file_name.ends_with(crate::tx::TMP_SUFFIX) {
+                    continue;
                 }
             }
             names.sort();
+            names.dedup();
 
             for name in names {
-                let p = tables_dir.join(format!("{name}.csv"));
-                let text = std::fs::read_to_string(&p)?;
-                let table = crate::table::Table::load(&p)?;
-                entries.push(TableEntry {
-                    name,
-                    columns: table.columns.clone(),
-                    rows: table.rows.len(),
-                    sha256: ObjectStore::hash_bytes(text.as_bytes()),
-                    bytes: std::fs::metadata(&p)?.len(),
-                });
+                let rel = format!("tables/{name}.csv");
+                let p = root.join(&rel);
+                let encrypted = crate::access::zone_covering(root, &rel)?.is_some();
+                // 加密区域里的表：走透明解密（未解锁就只报"锁着"）
+                let stored = match crate::access::read_through_zone(root, None, &rel) {
+                    Ok(Some(bytes)) => Some(bytes),
+                    Ok(None) => std::fs::read(&p).ok(),
+                    Err(_) => None,
+                };
+                let Some(stored) = stored else {
+                    entries.push(TableEntry {
+                        name,
+                        columns: Vec::new(),
+                        rows: 0,
+                        sha256: String::new(),
+                        bytes: std::fs::metadata(crate::access::enc_path(&p))
+                            .map(|m| m.len())
+                            .unwrap_or(0),
+                        encrypted: true,
+                        locked: true,
+                    });
+                    continue;
+                };
+                let text = String::from_utf8(stored.clone()).unwrap_or_default();
+                match crate::table::Table::from_csv_text(&p, &text) {
+                    Ok(table) => {
+                        entries.push(TableEntry {
+                            name,
+                            columns: table.columns.clone(),
+                            rows: table.rows.len(),
+                            sha256: ObjectStore::hash_bytes(&stored),
+                            bytes: stored.len() as u64,
+                            encrypted,
+                            locked: false,
+                        });
+                    }
+                    Err(_) => {
+                        entries.push(TableEntry {
+                            name,
+                            columns: Vec::new(),
+                            rows: 0,
+                            sha256: String::new(),
+                            bytes: stored.len() as u64,
+                            encrypted,
+                            locked: true,
+                        });
+                    }
+                }
             }
         }
 
@@ -121,6 +204,7 @@ impl Manifest {
             terms_profile: cfg.terms_profile.clone(),
             state_hash: state_hash(root),
             tables: entries,
+            access: access_summary(root)?,
             change_count,
             last_change_at,
         })
@@ -142,11 +226,19 @@ impl Manifest {
 }
 
 fn read_change_watermark(root: &Path) -> Result<(usize, String)> {
-    let p = root.join("tables").join("change_log.csv");
-    if !p.exists() {
-        return Ok((0, String::new()));
-    }
-    let table = crate::table::Table::load(&p)?;
+    let rel = "tables/change_log.csv";
+    let p = root.join(rel);
+    // 流水表本身也可能在加密区域里：走透明解密；没解锁就报"读不到"而不是报错
+    let bytes = match crate::access::read_through_zone(root, None, rel) {
+        Ok(Some(b)) => b,
+        Ok(None) => match std::fs::read(&p) {
+            Ok(b) => b,
+            Err(_) => return Ok((0, String::new())),
+        },
+        Err(_) => return Ok((0, String::new())),
+    };
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let table = crate::table::Table::from_csv_text(&p, &text)?;
     let last = table
         .rows
         .last()
@@ -155,18 +247,63 @@ fn read_change_watermark(root: &Path) -> Result<(usize, String)> {
     Ok((table.rows.len(), last))
 }
 
+/// 加密共享摘要（未解锁时**不暴露区域名**，只报个数）。
+fn access_summary(root: &Path) -> Result<AccessSummary> {
+    let zones = crate::access::Zones::load(root)?;
+    if zones.zones.is_empty() {
+        return Ok(AccessSummary::default());
+    }
+    let members = crate::access::Members::load(root)?.members.len();
+    let session = crate::access::resolve_session(root, None)?;
+    let mut out = AccessSummary {
+        members,
+        unlocked_as: session
+            .as_ref()
+            .map(|s| s.member.clone())
+            .unwrap_or_default(),
+        zones_total: zones.zones.len(),
+        zones_locked: 0,
+        zones: Vec::new(),
+    };
+    for z in &zones.zones {
+        let permission = session
+            .as_ref()
+            .and_then(|s| s.zone(&z.name))
+            .map(|u| u.permission.as_str().to_string());
+        let Some(permission) = permission else {
+            out.zones_locked += 1;
+            continue;
+        };
+        let files = crate::access::zone_files(root, z)
+            .into_iter()
+            .filter(|rel| crate::access::enc_path(&root.join(rel)).exists())
+            .count();
+        out.zones.push(ZoneSummary {
+            name: z.name.clone(),
+            label: z.label.clone(),
+            generation: z.generation,
+            key_fingerprint: z.key_fingerprint.clone(),
+            files,
+            permission,
+        });
+    }
+    Ok(out)
+}
+
 /// 项目状态指纹（D39）：把"非数据表"的项目状态一起算进去。
 ///
 /// 覆盖：`template.yaml`、`terms.yaml`、插件台账、停用名单、信任记录。
 /// 缺哪个就跳过哪个（老项目没有这些文件也应该能生成清单）。
 fn state_hash(root: &Path) -> String {
     use sha2::{Digest, Sha256};
-    const PARTS: [&str; 5] = [
+    const PARTS: [&str; 7] = [
         "template.yaml",
         "terms.yaml",
         crate::registry::REGISTRY_FILE,
         crate::plugin::STATE_FILE,
         "plugins/trust.yaml",
+        crate::access::ZONES_REL,
+        crate::access::MEMBERS_REL,
     ];
     let mut hasher = Sha256::new();
     for part in PARTS {

@@ -34,14 +34,17 @@
 //! 2. 写入必须原子：任何时刻断电，磁盘上的文件要么是旧内容、要么是新内容。
 //! 3. 可移植：不用本工具，仅靠 CSV/媒体文件也能理解并使用数据。
 
+pub mod access;
 pub mod ai;
 pub mod config;
+pub mod crypto;
 pub mod desired;
 pub mod error;
 pub mod format;
 pub mod history;
 pub mod ids;
 pub mod infer;
+pub mod keychain;
 pub mod manifest;
 pub mod market;
 pub mod plugin;
@@ -62,6 +65,9 @@ pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SCHEMA_VERSION: u32 = 1;
 
 pub use ai::{AgentSkill, AiContract};
+pub use access::{
+    AccessStatus, ExportReport, Members, Permission, Session, Zone, ZoneApplyReport, Zones,
+};
 pub use config::ProjectConfig;
 pub use desired::{Desired, DesiredDiff, WantedPlugin};
 pub use error::{CercisError, Result};

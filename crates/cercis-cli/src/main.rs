@@ -83,6 +83,8 @@ enum Command {
     DropTable(DropTableArgs),
     /// 插件市场：看预置市场、校验清单、从已下载的目录安装、卸载
     Market(MarketArgs),
+    /// 加密共享与分权：成员、加密区域、解锁、解密导出（S11）
+    Share(ShareArgs),
     /// 内核信息
     Version,
 }
@@ -481,6 +483,198 @@ enum MarketAction {
         /// 分支 / 标签 / 提交
         #[arg(long = "ref", default_value = "")]
         git_ref: String,
+    },
+}
+
+#[derive(Args, Debug)]
+struct ShareArgs {
+    #[command(subcommand)]
+    action: ShareAction,
+    /// 会话目录（默认 ~/.cercis/share；测试或多用户机器上可改）
+    #[arg(long, global = true, value_name = "DIR")]
+    home: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug)]
+enum ShareAction {
+    /// 看成员与加密区域（未授权成员看不到该区域）
+    List {
+        /// 项目目录
+        path: PathBuf,
+        /// 以某成员的身份看（不给就按当前已解锁的成员）
+        #[arg(long)]
+        member: Option<String>,
+    },
+    /// 看加密状态：每个区域多少文件、有没有还没加密的明文
+    Status {
+        path: PathBuf,
+        #[arg(long)]
+        member: Option<String>,
+    },
+    /// 新建成员（生成密钥对，私钥用他的口令加密）
+    MemberAdd {
+        path: PathBuf,
+        /// 成员 id（小写 ASCII，如 alice）
+        #[arg(long)]
+        id: String,
+        /// 显示名（可中文）
+        #[arg(long, default_value = "")]
+        name: String,
+        /// 从标准输入读口令（脚本用；不给来源时也是从标准输入读一行）
+        #[arg(long)]
+        password_stdin: bool,
+        /// 从文件读口令（文件里只放口令本身）
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+        /// 从环境变量读口令
+        #[arg(long)]
+        password_env: Option<String>,
+        /// 备注（写给未来的自己）
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// 改口令（重新加密私钥；不动数据、不用重发区域密钥）
+    Passwd {
+        path: PathBuf,
+        #[arg(long)]
+        id: String,
+        /// 旧口令所在文件
+        #[arg(long)]
+        old_password_file: Option<PathBuf>,
+        /// 旧口令所在环境变量
+        #[arg(long)]
+        old_password_env: Option<String>,
+        /// 新口令所在文件
+        #[arg(long)]
+        new_password_file: Option<PathBuf>,
+        /// 新口令所在环境变量
+        #[arg(long)]
+        new_password_env: Option<String>,
+    },
+    /// 建加密区域（默认立刻把命中的文件加密）
+    ZoneCreate {
+        path: PathBuf,
+        /// 区域名（小写 ASCII，如 patent-data）
+        #[arg(long)]
+        name: String,
+        /// 显示名（可中文）
+        #[arg(long, default_value = "")]
+        label: String,
+        /// 路径规则（可重复）：如 --path 'tables/patent_*.csv' --path 'methods/配方/**'
+        #[arg(long = "path", value_name = "规则")]
+        paths: Vec<String>,
+        /// 成员与权限，形如 --member alice:admin（可重复；至少要有一个 admin）
+        #[arg(long = "member", value_name = "成员[:权限]")]
+        members: Vec<String>,
+        /// 只写区域声明、先不加密（之后用 share apply）
+        #[arg(long)]
+        no_apply: bool,
+        /// 加密后保留明文副本（默认把明文删掉，不留副本）
+        #[arg(long)]
+        keep_plaintext: bool,
+    },
+    /// 给区域加成员 / 改权限（新增成员只拿到当前世代的密钥）
+    Grant {
+        path: PathBuf,
+        #[arg(long)]
+        zone: String,
+        #[arg(long)]
+        member: String,
+        /// read / write / admin
+        #[arg(long, default_value = "read")]
+        permission: String,
+        /// 以哪位成员的身份操作（默认用当前已解锁的成员）
+        #[arg(long = "as", value_name = "成员")]
+        actor: Option<String>,
+    },
+    /// 移除成员（换密钥 + 重新加密；被移除者从此刻起读不到新内容）
+    Revoke {
+        path: PathBuf,
+        #[arg(long)]
+        zone: String,
+        #[arg(long)]
+        member: String,
+        /// 只看会做什么，不动磁盘
+        #[arg(long)]
+        dry_run: bool,
+        /// 以哪位成员的身份操作（默认用当前已解锁的成员）
+        #[arg(long = "as", value_name = "成员")]
+        actor: Option<String>,
+    },
+    /// 把区域里还没加密的文件加密（明文换密文）
+    Apply {
+        path: PathBuf,
+        /// 只处理某个区域（不给就处理所有你有管理权限的区域）
+        #[arg(long)]
+        zone: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        keep_plaintext: bool,
+        /// 以哪位成员的身份操作（默认用当前已解锁的成员）
+        #[arg(long = "as", value_name = "成员")]
+        actor: Option<String>,
+    },
+    /// 用当前密钥把区域内的密文重新写一遍（修复"密钥对不上"的旧密文）
+    Rewrap {
+        path: PathBuf,
+        #[arg(long)]
+        zone: String,
+        /// 以哪位成员的身份操作（默认用当前已解锁的成员）
+        #[arg(long = "as", value_name = "成员")]
+        actor: Option<String>,
+    },
+    /// 解锁：解密私钥与自己的区域密钥（口令由你本人输入）
+    Unlock {
+        path: PathBuf,
+        #[arg(long)]
+        member: String,
+        #[arg(long)]
+        password_stdin: bool,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+        #[arg(long)]
+        password_env: Option<String>,
+        /// 直接用系统钥匙串里存过的口令（配合 --remember）
+        #[arg(long)]
+        keychain: bool,
+        /// 会话有效期（小时，默认 12）
+        #[arg(long, default_value_t = 12)]
+        ttl: i64,
+        /// 把口令交给系统钥匙串保管（下次可 --keychain）
+        #[arg(long)]
+        remember: bool,
+    },
+    /// 上锁：清掉本机会话
+    Lock {
+        path: PathBuf,
+        #[arg(long)]
+        member: Option<String>,
+        /// 连钥匙串里记住的口令一起删掉
+        #[arg(long)]
+        forget: bool,
+    },
+    /// 看区域里某个文件的明文（透明解密，不落盘）
+    Cat {
+        path: PathBuf,
+        /// 项目内相对路径，如 tables/observations.csv
+        #[arg(long)]
+        file: String,
+        #[arg(long)]
+        member: Option<String>,
+    },
+    /// 解密导出到 exports/（给 R / AI / 投稿用；留痕）
+    Export {
+        path: PathBuf,
+        #[arg(long)]
+        zone: String,
+        /// 导出到哪里（默认 exports/<区域名>）
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        member: Option<String>,
     },
 }
 
@@ -1758,6 +1952,7 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         }
 
         Command::Market(a) => market_cmd(a, cli.json)?,
+        Command::Share(a) => share_cmd(a, cli.json)?,
 
         Command::Validate(a) => {
             let p = Project::open(&a.path, None)?;
@@ -2454,6 +2649,742 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         }
     }
     Ok(())
+}
+
+/// 加密共享与分权（S11）：成员、区域、解锁、透明读写、解密导出。
+fn share_cmd(a: &ShareArgs, json_out: bool) -> Result<(), CercisError> {
+    use cercis_core::access::{self, Permission};
+
+    // `--home` 只影响本次进程（会话与钥匙串账号都放这里）
+    if let Some(dir) = &a.home {
+        std::env::set_var("CERCIS_SHARE_HOME", dir);
+    }
+
+    match &a.action {
+        ShareAction::List { path, member } => {
+            let root = path.clone();
+            require_project(&root)?;
+            let members = access::list_members(&root)?;
+            let session = access::resolve_session(&root, member.as_deref())?;
+            let who = member
+                .clone()
+                .or_else(|| session.as_ref().map(|s| s.member.clone()));
+            let zones = access::list_zones(&root, who.as_deref())?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "project": root.display().to_string(),
+                    "as_member": who,
+                    "unlocked_members": access::unlocked_members(&root),
+                    "share_home": access::share_home().display().to_string(),
+                    "keychain_available": cercis_core::keychain::available(),
+                    "members": members.iter().map(|m| serde_json::json!({
+                        "id": m.id,
+                        "display_name": m.display_name,
+                        "public_key_fingerprint": m.public_key.chars().take(8).collect::<String>(),
+                        "created": m.created,
+                        "note": m.note,
+                    })).collect::<Vec<_>>(),
+                    "zones": zones.iter().map(|z| serde_json::json!({
+                        "name": z.name,
+                        "label": z.label,
+                        "paths": z.paths,
+                        "generation": z.generation,
+                        "key_fingerprint": z.key_fingerprint,
+                        "members": z.members.iter().map(|m| serde_json::json!({
+                            "id": m.id,
+                            "permission": m.permission.as_str(),
+                        })).collect::<Vec<_>>(),
+                        "my_permission": who.as_deref().and_then(|w| z.permission_of(w)).map(|p| p.as_str().to_string()),
+                    })).collect::<Vec<_>>(),
+                }));
+            } else {
+                println!("成员（{} 人）：", members.len());
+                if members.is_empty() {
+                    println!("  还没有成员。新建：cercis share member-add <项目> --id alice --name 张老师");
+                }
+                for m in &members {
+                    println!(
+                        "  {:<12} {:<12} 公钥 {}…  建于 {}{}",
+                        m.id,
+                        if m.display_name.is_empty() { "—" } else { &m.display_name },
+                        &m.public_key[..8.min(m.public_key.len())],
+                        m.created,
+                        if m.note.is_empty() {
+                            String::new()
+                        } else {
+                            format!("（{}）", m.note)
+                        }
+                    );
+                }
+                println!("\n加密区域（{} 个）：", zones.len());
+                if zones.is_empty() {
+                    println!("  还没有加密区域。建一个：cercis share zone-create <项目> --name patent-data --path 'methods/配方/**' --member alice:admin");
+                }
+                for z in &zones {
+                    println!(
+                        "  {:<16} {:<14} 第 {} 代密钥（{}）  {} 条路径规则",
+                        z.name,
+                        if z.label.is_empty() { "—" } else { &z.label },
+                        z.generation,
+                        z.key_fingerprint,
+                        z.paths.len()
+                    );
+                    for m in &z.members {
+                        println!("      - {}：{}", m.id, m.permission.label_cn());
+                    }
+                }
+                println!("\n会话：{}", access::share_home().display());
+                let unlocked = access::unlocked_members(&root);
+                if unlocked.is_empty() {
+                    println!("  当前未解锁（加密区域里的内容现在读不了）");
+                } else {
+                    println!("  已解锁成员：{}", unlocked.join(" / "));
+                }
+                println!(
+                    "  系统钥匙串：{}",
+                    if cercis_core::keychain::available() {
+                        "可用（unlock --remember 可记住口令）"
+                    } else {
+                        "不可用（每次输入口令，或用 --password-file）"
+                    }
+                );
+                println!("  修复命令：share apply（补加密新文件）、share rewrap（统一密钥世代）");
+            }
+            Ok(())
+        }
+
+        ShareAction::Status { path, member } => {
+            let root = path.clone();
+            require_project(&root)?;
+            let st = access::status(&root, member.as_deref())?;
+            let issues = access::doctor_issues(&root)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "members": st.members.len(),
+                    "unlocked_as": st.session_member,
+                    "share_home": st.share_home,
+                    "keychain_available": st.keychain_available,
+                    "zones": st.zones.iter().map(|z| serde_json::json!({
+                        "zone": z.zone,
+                        "label": z.label,
+                        "generation": z.generation,
+                        "key_fingerprint": z.key_fingerprint,
+                        "files": z.files,
+                        "bytes": z.bytes,
+                        "permission": z.permission.map(|p| p.as_str().to_string()),
+                        "members": z.members.iter().map(|(id, p)| serde_json::json!({
+                            "id": id, "permission": p.as_str(),
+                        })).collect::<Vec<_>>(),
+                        "plaintext_left": z.plaintext_left,
+                        "unreadable": z.unreadable,
+                    })).collect::<Vec<_>>(),
+                    "issues": issues,
+                }));
+            } else if st.zones.is_empty() {
+                println!("本项目没有加密区域（默认不加密：CSV 保持开放，R / AI 可直读）。");
+                println!("要加密某部分内容：cercis share zone-create …");
+            } else {
+                println!(
+                    "加密状态（成员 {} 人，{}）：",
+                    st.members.len(),
+                    match &st.session_member {
+                        Some(m) => format!("当前以 {m} 解锁"),
+                        None => "当前未解锁".to_string(),
+                    }
+                );
+                for z in &st.zones {
+                    println!(
+                        "  {}  第 {} 代密钥（{}）  {} 个文件 / {} 字节{}",
+                        if z.label.is_empty() {
+                            z.zone.clone()
+                        } else {
+                            format!("{}（{}）", z.label, z.zone)
+                        },
+                        z.generation,
+                        z.key_fingerprint,
+                        z.files,
+                        z.bytes,
+                        match z.permission {
+                            Some(p) => format!("  我的权限：{}", p.label_cn()),
+                            None => String::new(),
+                        }
+                    );
+                    if !z.plaintext_left.is_empty() {
+                        println!(
+                            "      ⚠ 还有 {} 个文件没加密（明文在磁盘上）：{}",
+                            z.plaintext_left.len(),
+                            z.plaintext_left.join("、")
+                        );
+                    }
+                    if z.unreadable > 0 {
+                        println!(
+                            "      ⚠ 有 {} 个密文用当前钥匙解不开（多半是换密钥后没重加密）：修复命令 cercis share rewrap <项目> --zone {}",
+                            z.unreadable, z.zone
+                        );
+                    }
+                }
+                if !issues.is_empty() {
+                    println!("\n需要处理：");
+                    for i in &issues {
+                        println!("  - {i}");
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        ShareAction::MemberAdd {
+            path,
+            id,
+            name,
+            password_stdin,
+            password_file,
+            password_env,
+            note,
+        } => {
+            let root = path.clone();
+            require_project(&root)?;
+            let password = read_password_arg(*password_stdin, password_file, password_env, "口令")?;
+            let record = access::create_member(
+                &root,
+                id,
+                name,
+                &password,
+                cercis_core::crypto::KdfParams::from_env(),
+                note,
+            )?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "member": {
+                        "id": record.id,
+                        "display_name": record.display_name,
+                        "public_key": record.public_key,
+                        "key_file": record.key_file,
+                        "created": record.created,
+                    },
+                    "note": "私钥已用该成员的口令（Argon2id）加密后存进项目；口令本身没有写进项目。",
+                }));
+            } else {
+                println!("已新建成员 {}（{}）", record.id, record.display_name);
+                println!("  公钥：{}…", &record.public_key[..8.min(record.public_key.len())]);
+                println!("  私钥文件：{}（用他的口令加密过）", record.key_file);
+                println!("  提示：口令忘了无法找回——只能删掉这个身份，重新授权一个新的。");
+            }
+            Ok(())
+        }
+
+        ShareAction::Passwd {
+            path,
+            id,
+            old_password_file,
+            old_password_env,
+            new_password_file,
+            new_password_env,
+        } => {
+            let root = path.clone();
+            require_project(&root)?;
+            let old = read_password_arg(false, old_password_file, old_password_env, "旧口令")?;
+            let new = read_password_arg(false, new_password_file, new_password_env, "新口令")?;
+            access::change_password(
+                &root,
+                id,
+                &old,
+                &new,
+                cercis_core::crypto::KdfParams::from_env(),
+            )?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "member": id,
+                    "note": "私钥换了口令保护；区域密钥与数据都没动。",
+                }));
+            } else {
+                println!("已更新成员 {id} 的口令（区域密钥与数据都没动）。");
+            }
+            Ok(())
+        }
+
+        ShareAction::ZoneCreate {
+            path,
+            name,
+            label,
+            paths,
+            members,
+            no_apply,
+            keep_plaintext,
+        } => {
+            let root = path.clone();
+            require_project(&root)?;
+            let grants = parse_grants(members)?;
+            let (zone, report) = access::create_zone(
+                &root,
+                name,
+                label,
+                paths,
+                &grants,
+                !*no_apply,
+                *keep_plaintext,
+            )?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "zone": {
+                        "name": zone.name,
+                        "label": zone.label,
+                        "paths": zone.paths,
+                        "generation": zone.generation,
+                        "key_fingerprint": zone.key_fingerprint,
+                        "members": zone.members.iter().map(|m| serde_json::json!({
+                            "id": m.id, "permission": m.permission.as_str(),
+                        })).collect::<Vec<_>>(),
+                    },
+                    "encrypted": report.as_ref().map(|r| r.encrypted.clone()).unwrap_or_default(),
+                    "kept_plaintext": report.as_ref().map(|r| r.kept_plaintext.clone()).unwrap_or_default(),
+                }));
+            } else {
+                println!("已建立加密区域 {}（第 1 代密钥，指纹 {}）", zone.display(), zone.key_fingerprint);
+                println!("  路径规则：{}", zone.paths.join("、"));
+                println!("  成员：{}", zone.member_ids().join(" / "));
+                match &report {
+                    Some(r) if r.encrypted.is_empty() => {
+                        println!("  当前没有文件命中这些规则（以后新写入的文件会自动加密）。");
+                    }
+                    Some(r) => {
+                        println!(
+                            "  已加密 {} 个文件（{} 字节）{}",
+                            r.encrypted.len(),
+                            r.bytes,
+                            if r.kept_plaintext.is_empty() {
+                                "，明文副本已移除"
+                            } else {
+                                "，明文副本按要求保留"
+                            }
+                        );
+                        for f in &r.encrypted {
+                            println!("      - {f} → {f}.enc");
+                        }
+                    }
+                    None => println!("  按要求只写了声明，文件还没加密（之后：cercis share apply）。"),
+                }
+                println!("\n下一步：cercis share unlock <项目> --member <你>（解锁后才能像平常一样读它）");
+            }
+            Ok(())
+        }
+
+        ShareAction::Grant {
+            path,
+            zone,
+            member,
+            permission,
+            actor,
+        } => {
+            let root = path.clone();
+            require_project(&root)?;
+            let perm = Permission::parse(permission)?;
+            let z = access::grant(&root, zone, member, perm, actor.as_deref())?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "zone": z.name,
+                    "members": z.members.iter().map(|m| serde_json::json!({
+                        "id": m.id, "permission": m.permission.as_str(),
+                    })).collect::<Vec<_>>(),
+                }));
+            } else {
+                println!("已在区域 {} 里把 {member} 设为{}", z.display(), perm.label_cn());
+                if perm != Permission::Read {
+                    println!("  注：新加的成员只拿到当前世代的密钥，看不到更早的内容。");
+                }
+            }
+            Ok(())
+        }
+
+        ShareAction::Revoke {
+            path,
+            zone,
+            member,
+            dry_run,
+            actor,
+        } => {
+            let root = path.clone();
+            require_project(&root)?;
+            if *dry_run {
+                let zones = access::list_zones(&root, None)?;
+                let z = zones
+                    .iter()
+                    .find(|z| &z.name == zone)
+                    .ok_or_else(|| CercisError::NotFound(format!("区域不存在: {zone}")))?;
+                let files = access::zone_files(&root, z)
+                    .into_iter()
+                    .filter(|rel| access::enc_path(&root.join(rel)).exists())
+                    .count();
+                let msg = format!(
+                    "试运行：会从区域 {} 移除 {member}，换新一代密钥并重新加密 {files} 个文件；\
+                     被移除者从此刻起读不到新内容（他之前看过的无法追回）",
+                    z.display()
+                );
+                if json_out {
+                    print_json(&serde_json::json!({
+                        "schema": "cercis.cli/1", "ok": true,
+                        "dry_run": true, "zone": z.name, "member": member, "files": files,
+                    }));
+                } else {
+                    println!("{msg}");
+                }
+                return Ok(());
+            }
+            let rep = access::revoke(&root, zone, member, actor.as_deref())?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "zone": rep.zone,
+                    "removed": rep.member,
+                    "generation": rep.generation,
+                    "key_fingerprint": rep.key_fingerprint,
+                    "reencrypted": rep.reencrypted,
+                    "remaining": rep.remaining,
+                }));
+            } else {
+                println!(
+                    "已从区域 {zone} 移除 {member}：换到第 {} 代密钥（{}），重新加密 {} 个文件。",
+                    rep.generation, rep.key_fingerprint, rep.reencrypted
+                );
+                println!("  剩下成员：{}", rep.remaining.join(" / "));
+                println!("  提醒：他之前已经看到过的内容无法追回；如需事后补救，请更换真正的敏感信息（如口令、配方编号）。");
+            }
+            Ok(())
+        }
+
+        ShareAction::Apply {
+            path,
+            zone,
+            dry_run,
+            keep_plaintext,
+            actor,
+        } => {
+            let root = path.clone();
+            require_project(&root)?;
+            let reports = access::apply(
+                &root,
+                zone.as_deref(),
+                actor.as_deref(),
+                *dry_run,
+                *keep_plaintext,
+            )?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "dry_run": dry_run,
+                    "zones": reports.iter().map(|r| serde_json::json!({
+                        "zone": r.zone,
+                        "encrypted": r.encrypted,
+                        "kept_plaintext": r.kept_plaintext,
+                        "already": r.already,
+                        "bytes": r.bytes,
+                    })).collect::<Vec<_>>(),
+                }));
+            } else if reports.is_empty() {
+                println!("没有需要处理的区域。");
+            } else {
+                for r in &reports {
+                    if r.encrypted.is_empty() {
+                        println!(
+                            "区域 {}：没有新的明文文件（已有 {} 个密文文件）。",
+                            r.zone, r.already
+                        );
+                    } else if *dry_run {
+                        println!(
+                            "试运行：区域 {} 会加密 {} 个文件（{} 字节）：{}",
+                            r.zone,
+                            r.encrypted.len(),
+                            r.bytes,
+                            r.encrypted.join("、")
+                        );
+                    } else {
+                        println!(
+                            "区域 {}：已加密 {} 个文件（{} 字节）{}",
+                            r.zone,
+                            r.encrypted.len(),
+                            r.bytes,
+                            if r.kept_plaintext.is_empty() {
+                                "，明文已移除"
+                            } else {
+                                "，明文副本保留"
+                            }
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        ShareAction::Rewrap { path, zone, actor } => {
+            let root = path.clone();
+            require_project(&root)?;
+            let (rewritten, _failed, fingerprint) = access::rewrap(&root, zone, actor.as_deref())?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "zone": zone,
+                    "rewritten": rewritten,
+                    "key_fingerprint": fingerprint,
+                }));
+            } else {
+                println!(
+                    "区域 {zone}：已用当前密钥（{fingerprint}）重写 {rewritten} 个密文文件。"
+                );
+            }
+            Ok(())
+        }
+
+        ShareAction::Unlock {
+            path,
+            member,
+            password_stdin,
+            password_file,
+            password_env,
+            keychain,
+            ttl,
+            remember,
+        } => {
+            let root = path.clone();
+            require_project(&root)?;
+            let report = if *keychain {
+                match access::unlock_with_keychain(&root, member, *ttl)? {
+                    Some(r) => r,
+                    None => {
+                        return Err(CercisError::Invalid(format!(
+                            "钥匙串里没有 {member} 的口令。\n\
+                             - 第一次请先：cercis share unlock <项目> --member {member} --remember\n\
+                             - 或改用 --password-file / --password-env"
+                        )))
+                    }
+                }
+            } else {
+                let password =
+                    read_password_arg(*password_stdin, password_file, password_env, "口令")?;
+                access::unlock(&root, member, &password, *ttl, *remember)?
+            };
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "member": report.member,
+                    "expires": report.expires,
+                    "session_file": report.session_file,
+                    "zones": report.zones.iter().map(|z| serde_json::json!({
+                        "name": z.name,
+                        "permission": z.permission.as_str(),
+                        "key_fingerprint": z.key_fingerprint,
+                    })).collect::<Vec<_>>(),
+                    "notes": report.notes,
+                }));
+            } else {
+                println!("已解锁：{}", report.member);
+                if report.zones.is_empty() {
+                    println!("  （他目前不在任何加密区域里，所以没有拿到密钥）");
+                }
+                for z in &report.zones {
+                    println!(
+                        "  - {:<16} {}  密钥指纹 {}",
+                        z.name,
+                        z.permission.label_cn(),
+                        z.key_fingerprint
+                    );
+                }
+                println!("  会话到期：{}", report.expires);
+                println!("  会话文件：{}（0600，只在本机，不进项目）", report.session_file);
+                for n in &report.notes {
+                    println!("  注：{n}");
+                }
+                if report.zones.iter().any(|z| z.permission.can_write()) {
+                    println!("\n现在起，区域内的表可以像普通表一样读写了（透明解密/加密）。");
+                } else {
+                    println!("\n你在这几个区域里是只读：能看、能导出，改数据需要管理员给你 write 权限。");
+                }
+            }
+            Ok(())
+        }
+
+        ShareAction::Lock {
+            path,
+            member,
+            forget,
+        } => {
+            let root = path.clone();
+            require_project(&root)?;
+            let locked = access::lock(&root, member.as_deref(), *forget)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "locked": locked,
+                    "forgot_keychain": forget,
+                }));
+            } else if locked.is_empty() {
+                println!("本来就没有解锁的会话。");
+            } else {
+                println!("已上锁：{}", locked.join(" / "));
+                if *forget {
+                    println!("  钥匙串里记住的口令也已删除。");
+                }
+            }
+            Ok(())
+        }
+
+        ShareAction::Cat {
+            path,
+            file,
+            member,
+        } => {
+            let root = path.clone();
+            require_project(&root)?;
+            match access::read_through_zone(&root, member.as_deref(), file)? {
+                Some(bytes) => {
+                    if json_out {
+                        print_json(&serde_json::json!({
+                            "schema": "cercis.cli/1",
+                            "ok": true,
+                            "file": file,
+                            "bytes": bytes.len(),
+                            "text": String::from_utf8_lossy(&bytes),
+                        }));
+                    } else {
+                        use std::io::Write;
+                        std::io::stdout().write_all(&bytes)?;
+                    }
+                }
+                None => {
+                    return Err(CercisError::Invalid(format!(
+                        "「{file}」不在任何加密区域里（普通文件直接打开就行，不需要 share cat）"
+                    )))
+                }
+            }
+            Ok(())
+        }
+
+        ShareAction::Export {
+            path,
+            zone,
+            to,
+            dry_run,
+            member,
+        } => {
+            let root = path.clone();
+            require_project(&root)?;
+            let rep = access::export_zone(&root, zone, member.as_deref(), to.as_deref(), *dry_run)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "dry_run": rep.dry_run,
+                    "zone": rep.zone,
+                    "member": rep.member,
+                    "dest": rep.dest,
+                    "files": rep.files,
+                    "bytes": rep.bytes,
+                }));
+            } else if *dry_run {
+                println!(
+                    "试运行：区域 {} 会解密导出 {} 个文件（{} 字节）到 {}",
+                    rep.zone,
+                    rep.files.len(),
+                    rep.bytes,
+                    rep.dest
+                );
+            } else {
+                println!(
+                    "已解密导出 {} 个文件（{} 字节）到 {}（以 {} 的身份）",
+                    rep.files.len(),
+                    rep.bytes,
+                    rep.dest,
+                    rep.member
+                );
+                println!("  注意：导出的明文副本在项目 exports/ 下，用完记得清理；这次导出已记入流水。");
+            }
+            Ok(())
+        }
+    }
+}
+
+fn require_project(root: &Path) -> Result<(), CercisError> {
+    if root.join("project.yaml").exists() {
+        Ok(())
+    } else {
+        Err(CercisError::NotFound(format!(
+            "不是 Cercis 项目（缺少 project.yaml）: {}",
+            root.display()
+        )))
+    }
+}
+
+/// 口令来源：`--password-env` > `--password-file` > 标准输入读一行。
+fn read_password_arg(
+    stdin_flag: bool,
+    file: &Option<PathBuf>,
+    env_name: &Option<String>,
+    what: &str,
+) -> Result<String, CercisError> {
+    if let Some(name) = env_name {
+        let name = name.trim();
+        match std::env::var(name) {
+            Ok(v) if !v.is_empty() => return Ok(v),
+            _ => {
+                return Err(CercisError::Invalid(format!(
+                    "环境变量 {name} 没设置或为空（{what}要从这里读）"
+                )))
+            }
+        }
+    }
+    if let Some(f) = file {
+        let text = std::fs::read_to_string(f)?;
+        let s = text.trim_end_matches(['\n', '\r']).to_string();
+        if s.is_empty() {
+            return Err(CercisError::Invalid(format!("口令文件是空的: {}", f.display())));
+        }
+        return Ok(s);
+    }
+    let _ = stdin_flag;
+    eprintln!("请输入{what}（直接粘贴或输入，然后回车；屏幕上会显示）:");
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf)?;
+    let s = buf.trim_end_matches(['\n', '\r']).to_string();
+    if s.is_empty() {
+        return Err(CercisError::Invalid(format!("{what}不能为空")));
+    }
+    Ok(s)
+}
+
+/// 解析 `--member alice:admin` / `--member bob`（默认只读）。
+fn parse_grants(items: &[String]) -> Result<Vec<(String, cercis_core::access::Permission)>, CercisError> {
+    use cercis_core::access::Permission;
+    let mut out = Vec::new();
+    for raw in items {
+        for part in raw.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let (id, perm) = match part.split_once(':') {
+                Some((id, p)) => (id.trim().to_string(), Permission::parse(p)?),
+                None => (part.to_string(), Permission::Read),
+            };
+            out.push((id, perm));
+        }
+    }
+    Ok(out)
 }
 
 fn print_json(v: &serde_json::Value) {

@@ -73,7 +73,8 @@ impl Table {
         }
     }
 
-    fn from_csv_text(path: &Path, text: &str) -> Result<Self> {
+    /// 从 CSV 文本构造（加密区域要先把密文解密成文本再走这里）。
+    pub(crate) fn from_csv_text(path: &Path, text: &str) -> Result<Self> {
         let mut rdr = csv::ReaderBuilder::new()
             .has_headers(true)
             .flexible(false)
