@@ -119,6 +119,10 @@ impl AiContract {
             cmd("cercis plugins <项目>", "看插件：是否生效、为什么没生效、有没有键冲突、有没有撤不回去的登记", "cercis plugins ./项目 --json"),
             cmd("cercis plugins <项目> register --plugin <ID> --kind <KIND> --target <目标>", "插件登记自己对项目结构的增改（停用时按倒序回滚）", "cercis plugins ./项目 register --plugin demo_io --kind column --target observations.spad_note"),
             cmd("cercis plugins <项目> disable --id <ID>", "停用插件并回滚它的登记（先加 --dry-run 看会撤什么）", "cercis plugins ./项目 disable --id demo_io --dry-run"),
+            cmd("cercis market list", "看默认预置市场（指向公开仓库）与已从市场安装的插件", "cercis market list --json"),
+            cmd("cercis market validate --file <市场清单>", "校验一份 marketplace.json（下载由 app 负责，内核不联网）", "cercis market validate --file ./marketplace.json"),
+            cmd("cercis market install --from <已下载目录> --plugin <ID>", "从**已经下载好的**仓库目录安装插件（断网可用；记来源、版本与指纹）", "cercis market install --from ~/Downloads/cercis-kits-research --plugin research_io --json"),
+            cmd("cercis market uninstall --id <ID>", "卸载市场安装的插件（删本地副本 + 清安装记录；随包插件只能停用）", "cercis market uninstall --id research_io --dry-run"),
             cmd("cercis agents <项目>", "刷新 AI 材料与 Agent 技能包", "cercis agents ./项目"),
             cmd("cercis skill <项目>", "生成 Agent 技能包（--install codex|claude 可直接装）", "cercis skill ./项目 --install codex"),
         ];
