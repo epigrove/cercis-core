@@ -262,6 +262,10 @@ enum PluginsAction {
     Disable(DisableArgs),
     /// 重新启用插件
     Enable(EnableArgs),
+    /// 屏蔽插件（比停用更彻底：不加载、不在界面出现、不执行命令）
+    Block(EnableArgs),
+    /// 取消屏蔽（不自动启用，要不要用由你决定）
+    Unblock(EnableArgs),
 }
 
 #[derive(Args, Debug)]
@@ -354,8 +358,35 @@ struct MarketArgs {
 
 #[derive(Subcommand, Debug)]
 enum MarketAction {
-    /// 列出市场：默认预置的（指向 GitHub 公开仓库）与已安装的插件
+    /// 列出市场：预置的（基础包随包不可删 / 科研包预添加可删）与已安装的插件
     List,
+    /// 添加一个市场（自建 / 私有仓库；鉴权在 app 侧）
+    Add {
+        /// git 仓库地址（用 --preset 找回预置市场时可省）
+        #[arg(long, default_value = "")]
+        repository: String,
+        /// 市场 id（留空按仓库名推一个）
+        #[arg(long, default_value = "")]
+        id: String,
+        /// 显示名
+        #[arg(long, default_value = "")]
+        label: String,
+        /// 清单在仓库里的相对路径
+        #[arg(long, default_value = "marketplace.json")]
+        path: String,
+        /// 默认分支 / 标签
+        #[arg(long = "ref", default_value = "main")]
+        git_ref: String,
+        /// 把某个预置市场找回来（如 research）
+        #[arg(long, default_value = "")]
+        preset: String,
+    },
+    /// 移除一个市场（随包的基础市场不可移除；移除不会自动卸载它装的插件）
+    Remove {
+        /// 市场 id
+        #[arg(long)]
+        id: String,
+    },
     /// 校验一份市场清单（文件路径；下载由 app 负责，内核不联网）
     Validate {
         /// marketplace.json（或 .yaml）
@@ -380,7 +411,7 @@ enum MarketAction {
         #[arg(long)]
         dry_run: bool,
     },
-    /// 卸载市场安装的插件（删本地副本 + 清安装记录；随包插件只能停用）
+    /// 删除插件（**随包插件也能删**：记墓碑，升级不会偷偷装回来）
     Uninstall {
         /// 插件 ID
         #[arg(long)]
@@ -388,6 +419,24 @@ enum MarketAction {
         /// 只看会删什么
         #[arg(long)]
         dry_run: bool,
+        /// 记一句"为什么不用它了"（可选）
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// 找回被删掉的插件（清墓碑；给 --from 就顺手装回来）
+    Restore {
+        /// 插件 ID
+        #[arg(long)]
+        id: String,
+        /// 已下载好的仓库目录（给了就顺手装回来）
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// 市场 id（记进安装台账）
+        #[arg(long, default_value = "local")]
+        market: String,
+        /// 分支 / 标签 / 提交
+        #[arg(long = "ref", default_value = "")]
+        git_ref: String,
     },
 }
 
@@ -1217,6 +1266,59 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                         }
                         Ok(())
                     }
+                    PluginsAction::Block(x) => {
+                        let p = Project::open(&a.path, None)?;
+                        let mut st = cercis_core::plugin::PluginState::load(&a.path)?;
+                        st.block(&x.id);
+                        st.save(&a.path)?;
+                        p.store.append_change(&ChangeEntry::new(
+                            &p.store.identity.user_id,
+                            &p.store.identity.device_for_log(),
+                            "block",
+                            "plugin",
+                            &x.id,
+                            &format!("屏蔽插件 {}（不加载、界面不出现、命令不执行）", x.id),
+                            "",
+                            "",
+                        ))?;
+                        if cli.json {
+                            print_json(&serde_json::json!({
+                                "schema": "cercis.cli/1",
+                                "ok": true,
+                                "blocked": x.id,
+                            }));
+                        } else {
+                            println!("已屏蔽 {}（要恢复：plugins unblock --id {}）", x.id, x.id);
+                        }
+                        Ok(())
+                    }
+                    PluginsAction::Unblock(x) => {
+                        let p = Project::open(&a.path, None)?;
+                        let mut st = cercis_core::plugin::PluginState::load(&a.path)?;
+                        st.unblock(&x.id);
+                        st.save(&a.path)?;
+                        p.store.append_change(&ChangeEntry::new(
+                            &p.store.identity.user_id,
+                            &p.store.identity.device_for_log(),
+                            "unblock",
+                            "plugin",
+                            &x.id,
+                            &format!("取消屏蔽插件 {}", x.id),
+                            "",
+                            "",
+                        ))?;
+                        if cli.json {
+                            print_json(&serde_json::json!({
+                                "schema": "cercis.cli/1",
+                                "ok": true,
+                                "unblocked": x.id,
+                            }));
+                        } else {
+                            println!("已取消屏蔽 {}（它现在是停用状态，要启用再跑 enable）", x.id);
+                        }
+                        Ok(())
+                    }
+
                 };
             }
 
@@ -1235,6 +1337,7 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                             "fingerprint": p.fingerprint,
                             "trusted": trust.is_trusted(&p.manifest.id, &p.fingerprint),
                             "disabled": state.is_disabled(&p.manifest.id),
+                            "blocked": state.is_blocked(&p.manifest.id),
                             "active": activation.active && !state.is_disabled(&p.manifest.id),
                             "inactive_reasons": activation.reasons,
                             "permissions": p.manifest.permission_summary(),
@@ -1251,8 +1354,11 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                 for p in &found {
                     let trusted = trust.is_trusted(&p.manifest.id, &p.fingerprint);
                     let disabled = state.is_disabled(&p.manifest.id);
+                    let blocked = state.is_blocked(&p.manifest.id);
                     let activation = p.manifest.activation(&a.path);
-                    let status = if disabled {
+                    let status = if blocked {
+                        "已屏蔽（不加载、界面不出现）"
+                    } else if disabled {
                         "已停用"
                     } else if p.origin == "project" {
                         if trusted {
@@ -2057,7 +2163,9 @@ fn market_cmd(a: &MarketArgs, json_out: bool) -> Result<(), CercisError> {
                 // 市场清单：预置条目 + 已装插件（下载在 app，内核只认"已经下载好的东西"）
                 MarketAction::List => {
                     let installs = cercis_core::Installs::load(&global_dir)?;
-                    let presets: Vec<serde_json::Value> = cercis_core::PRESET_MARKETS
+                    let user = cercis_core::UserMarkets::load(&global_dir)?;
+                    let effective = user.effective();
+                    let markets: Vec<serde_json::Value> = effective
                         .iter()
                         .map(|m| {
                             serde_json::json!({
@@ -2066,7 +2174,8 @@ fn market_cmd(a: &MarketArgs, json_out: bool) -> Result<(), CercisError> {
                                 "repository": m.repository,
                                 "marketplace_path": m.marketplace_path,
                                 "default_ref": m.default_ref,
-                                "preset": true,
+                                "bundled": m.bundled,
+                                "removable": !m.bundled,
                             })
                         })
                         .collect();
@@ -2075,33 +2184,139 @@ fn market_cmd(a: &MarketArgs, json_out: bool) -> Result<(), CercisError> {
                             "schema": "cercis.cli/1",
                             "ok": true,
                             "global_dir": global_dir.display().to_string(),
-                            "presets": presets,
+                            "markets": markets,
+                            "removed_presets": user.removed_presets,
                             "installed": installs.records,
                         }));
                     } else {
-                        println!("默认预置市场（清单在 GitHub 公开仓库里，下载由 app 负责）：");
-                        for m in cercis_core::PRESET_MARKETS.iter() {
+                        println!("市场（市场就是 Cercis 管理插件的方式：来源、版本、装卸都在这里）：");
+                        for m in &effective {
                             println!(
-                                "  {}  {}  {}/{}（默认 {}）",
-                                m.id, m.label_cn, m.repository, m.marketplace_path, m.default_ref
+                                "  {:<9} {:<18} {}{}  {}",
+                                m.id,
+                                if m.label_cn.is_empty() { "—" } else { &m.label_cn },
+                                m.repository,
+                                if m.default_ref.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("（{}）", m.default_ref)
+                                },
+                                if m.bundled {
+                                    "随包交付：不可移除，插件只能停用"
+                                } else {
+                                    "可移除"
+                                }
                             );
                         }
-                        println!("\n私有仓库/自建市场：在 app 里添加时给地址与鉴权（内核不联网）。");
+                        if !user.removed_presets.is_empty() {
+                            println!(
+                                "  （已移除的预置市场：{}；找回来：market add --preset <id>）",
+                                user.removed_presets.join(" / ")
+                            );
+                        }
                         println!("\n用户插件目录：{}", global_dir.display());
                         if installs.records.is_empty() {
-                            println!("已安装（来自市场）：无");
+                            println!("已装（来自市场）：无。科研插件默认不预装——想用就装。");
                         } else {
-                            println!("已安装（来自市场）：");
+                            println!("已装（来自市场）：");
                             for r in &installs.records {
                                 println!(
-                                    "  {}  {}  {}  指纹 {}",
+                                    "  {}  {}  {}  {}{}",
                                     r.id,
                                     r.version,
                                     r.repository,
-                                    &r.fingerprint[..8.min(r.fingerprint.len())]
+                                    &r.fingerprint[..8.min(r.fingerprint.len())],
+                                    if r.bundled { "（随包：不可删除）" } else { "" }
                                 );
                             }
                         }
+                    }
+                    Ok(())
+                }
+                MarketAction::Add {
+                    repository,
+                    id,
+                    label,
+                    path,
+                    git_ref,
+                    preset,
+                } => {
+                    let mut user = cercis_core::UserMarkets::load(&global_dir)?;
+                    if !preset.trim().is_empty() {
+                        user.restore_preset(preset.trim())?;
+                        user.save(&global_dir)?;
+                        let msg = format!("已找回预置市场 {}", preset.trim());
+                        if json_out {
+                            print_json(&serde_json::json!({
+                                "schema": "cercis.cli/1",
+                                "ok": true,
+                                "action": "market.add",
+                                "preset": preset.trim(),
+                                "message": msg,
+                            }));
+                        } else {
+                            println!("{msg}");
+                        }
+                        return Ok(());
+                    }
+                    if repository.trim().is_empty() {
+                        return Err(CercisError::Invalid(
+                            "要么给 --repository <git 地址>，要么用 --preset <id> 找回预置市场".into(),
+                        ));
+                    }
+                    let id = if id.trim().is_empty() {
+                        repository
+                            .trim_end_matches('/')
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("market")
+                            .trim_end_matches(".git")
+                            .to_string()
+                    } else {
+                        id.trim().to_string()
+                    };
+                    let entry = cercis_core::market::MarketEntry {
+                        id: id.clone(),
+                        label_cn: if label.trim().is_empty() {
+                            id.clone()
+                        } else {
+                            label.trim().to_string()
+                        },
+                        repository: repository.trim().to_string(),
+                        marketplace_path: path.trim().to_string(),
+                        default_ref: git_ref.trim().to_string(),
+                        bundled: false,
+                        added_at: cercis_core::ids::now_iso8601(),
+                    };
+                    user.add(entry.clone());
+                    user.save(&global_dir)?;
+                    if json_out {
+                        print_json(&serde_json::json!({
+                            "schema": "cercis.cli/1",
+                            "ok": true,
+                            "action": "market.add",
+                            "market": entry,
+                        }));
+                    } else {
+                        println!("已添加市场 {}（{}）", entry.id, entry.repository);
+                        println!("私有仓库的鉴权在 app 侧处理；内核只做校验与安装。");
+                    }
+                    Ok(())
+                }
+                MarketAction::Remove { id } => {
+                    let mut user = cercis_core::UserMarkets::load(&global_dir)?;
+                    let message = user.remove(id)?;
+                    user.save(&global_dir)?;
+                    if json_out {
+                        print_json(&serde_json::json!({
+                            "schema": "cercis.cli/1",
+                            "ok": true,
+                            "action": "market.remove",
+                            "id": id,
+                            "message": message,
+                        }));
+                    } else {
+                        println!("{message}");
                     }
                     Ok(())
                 }
@@ -2185,12 +2400,14 @@ fn market_cmd(a: &MarketArgs, json_out: bool) -> Result<(), CercisError> {
                     } else {
                         market_data.repository.clone()
                     };
+                    // D42：随包市场（bundled）里的插件装进来也是"随包插件"——不能删除，只能停用
                     let (record, dest) = cercis_core::market::install_from_dir(
                         &src,
                         &global_dir,
                         market,
                         &repo,
                         git_ref,
+                        market_data.bundled,
                     )?;
                     if json_out {
                         print_json(&serde_json::json!({
@@ -2213,8 +2430,9 @@ fn market_cmd(a: &MarketArgs, json_out: bool) -> Result<(), CercisError> {
                     }
                     Ok(())
                 }
-                MarketAction::Uninstall { id, dry_run } => {
-                    let (_, message) = cercis_core::market::uninstall(&global_dir, id, *dry_run)?;
+                MarketAction::Uninstall { id, dry_run, note } => {
+                    let (_, message) =
+                        cercis_core::market::uninstall(&global_dir, id, *dry_run, note)?;
                     if json_out {
                         print_json(&serde_json::json!({
                             "schema": "cercis.cli/1",
@@ -2222,6 +2440,62 @@ fn market_cmd(a: &MarketArgs, json_out: bool) -> Result<(), CercisError> {
                             "dry_run": dry_run,
                             "id": id,
                             "message": message,
+                        }));
+                    } else {
+                        println!("{message}");
+                    }
+                    Ok(())
+                }
+                MarketAction::Restore {
+                    id,
+                    from,
+                    market,
+                    git_ref,
+                } => {
+                    // 给了目录就按市场清单找到插件真正的位置（仓库根 → plugins/<id>），
+                    // 否则会拿仓库根当插件目录，报"清单不存在"
+                    let (resolved, bundled, repo_url) = match from {
+                        Some(root) => {
+                            let listing = if root.join("marketplace.json").is_file() {
+                                root.join("marketplace.json")
+                            } else {
+                                root.join("marketplace.yaml")
+                            };
+                            let market_data = cercis_core::Marketplace::load(&listing)?;
+                            let entry = market_data.plugin(id).ok_or_else(|| {
+                                CercisError::NotFound(format!(
+                                    "市场 {} 里没有插件 {id}",
+                                    market_data.summary()
+                                ))
+                            })?;
+                            let mut src = root.join(&entry.path);
+                            if !src.is_dir() {
+                                src = root.clone();
+                            }
+                            (
+                                Some(src),
+                                market_data.bundled,
+                                market_data.repository.clone(),
+                            )
+                        }
+                        None => (None, false, String::new()),
+                    };
+                    let (_, message, dest) = cercis_core::market::restore(
+                        &global_dir,
+                        id,
+                        resolved.as_deref(),
+                        &repo_url,
+                        market,
+                        git_ref,
+                        bundled,
+                    )?;
+                    if json_out {
+                        print_json(&serde_json::json!({
+                            "schema": "cercis.cli/1",
+                            "ok": true,
+                            "id": id,
+                            "message": message,
+                            "path": dest.map(|d| d.display().to_string()),
                         }));
                     } else {
                         println!("{message}");

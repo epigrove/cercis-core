@@ -262,11 +262,17 @@ fn parse_version(s: &str) -> (u64, u64, u64) {
     )
 }
 
-/// 停用名单（`plugins/state.yaml`）。
+/// 停用与屏蔽名单（`plugins/state.yaml`）。
+///
+/// 两者的区别只在**用户看到的程度**（D43）：停用 = 不加载但还列在插件列表里；
+/// 屏蔽 = 连列表里都不出现、命令也不执行（相当于"我不想知道它存在"）。
+/// 共同点：都不加载、都在项目流水里留痕、都能随时取消。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginState {
     #[serde(default)]
     pub disabled: Vec<String>,
+    #[serde(default)]
+    pub blocked: Vec<String>,
 }
 
 impl PluginState {
@@ -288,6 +294,24 @@ impl PluginState {
 
     pub fn is_disabled(&self, id: &str) -> bool {
         self.disabled.iter().any(|d| d == id)
+    }
+
+    /// 是否被屏蔽（D43）：比"停用"更彻底——不加载、不执行命令，界面里也直接不出现。
+    pub fn is_blocked(&self, id: &str) -> bool {
+        self.blocked.iter().any(|d| d == id)
+    }
+
+    /// 屏蔽（同时会把它当成停用：两者都不加载）。
+    pub fn block(&mut self, id: &str) {
+        if !self.is_blocked(id) {
+            self.blocked.push(id.to_string());
+        }
+        self.disable(id);
+    }
+
+    /// 取消屏蔽（不自动重新启用：要不要用由用户再决定）。
+    pub fn unblock(&mut self, id: &str) {
+        self.blocked.retain(|d| d != id);
     }
 
     pub fn disable(&mut self, id: &str) {

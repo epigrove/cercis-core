@@ -64,7 +64,7 @@ pub use ai::{AgentSkill, AiContract};
 pub use config::ProjectConfig;
 pub use error::{CercisError, Result};
 pub use manifest::Manifest;
-pub use market::{Installs, MarketPlugin, Marketplace, PRESET_MARKETS};
+pub use market::{Installs, MarketEntry, MarketPlugin, Marketplace, UserMarkets, PRESET_MARKETS};
 pub use plugin::{DiscoveredPlugin, PluginManifest, TrustRecord, PLUGIN_API_VERSION};
 pub use project::Project;
 pub use query::{Condition, Op, Query, SortDir, SortKey};

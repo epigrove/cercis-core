@@ -89,17 +89,22 @@ fn presets_are_public_github_and_installed_list_is_empty_at_first() {
     let global = dir.join("global");
     let g = global.display().to_string();
     let out = ok(&["market", "list", "--json"], &[("CERCIS_GLOBAL_PLUGINS", &g)]);
-    let presets = out["presets"].as_array().unwrap();
-    assert_eq!(presets.len(), 1, "目前只预置科研市场：{out}");
-    assert!(
-        presets[0]["repository"]
-            .as_str()
-            .unwrap()
-            .starts_with("https://github.com/epigrove/"),
-        "默认预置市场指向公开 GitHub 仓库：{out}"
-    );
-    assert_eq!(presets[0]["default_ref"], "main");
-    assert_eq!(out["installed"].as_array().unwrap().len(), 0);
+    let markets = out["markets"].as_array().unwrap();
+    assert_eq!(markets.len(), 2, "预置两份：基础包 + 科研包：{out}");
+    for m in markets {
+        assert!(
+            m["repository"].as_str().unwrap().starts_with("https://github.com/epigrove/"),
+            "预置市场都指向公开 GitHub 仓库：{out}"
+        );
+        assert_eq!(m["default_ref"], "main");
+    }
+    let basic = markets.iter().find(|m| m["id"] == "basic").unwrap();
+    let research = markets.iter().find(|m| m["id"] == "research").unwrap();
+    assert_eq!(basic["bundled"], true);
+    assert_eq!(basic["removable"], false, "随包市场不可移除：{out}");
+    assert_eq!(research["bundled"], false);
+    assert_eq!(research["removable"], true, "科研市场只是预添加，可移除：{out}");
+    assert_eq!(out["installed"].as_array().unwrap().len(), 0, "科研插件默认不预装");
 }
 
 #[test]
@@ -257,11 +262,117 @@ fn uninstall_removes_local_copy_but_bundled_plugins_cannot_be_deleted() {
     let listed = ok(&["market", "list", "--json"], &[("CERCIS_GLOBAL_PLUGINS", &g)]);
     assert_eq!(listed["installed"].as_array().unwrap().len(), 0);
 
-    // 随包插件（没有安装记录）不能物理删除
+    // 找回：从仓库根（带 marketplace.json）恢复——插件在 plugins/<id> 下也能找到
+    let restored = ok(
+        &[
+            "market", "restore", "--id", "demo_report", "--from", &repo.display().to_string(),
+            "--json",
+        ],
+        &[("CERCIS_GLOBAL_PLUGINS", &g)],
+    );
+    assert!(
+        restored["message"].as_str().unwrap().contains("装回"),
+        "{restored}"
+    );
+    assert!(global.join("demo_report/plugin.yaml").is_file(), "找回后应可用");
+    let listed = ok(&["market", "list", "--json"], &[("CERCIS_GLOBAL_PLUGINS", &g)]);
+    assert_eq!(listed["installed"].as_array().unwrap().len(), 1, "{listed}");
+
+    // 再删一次，回到"没有安装记录"的状态
+    ok(
+        &["market", "uninstall", "--id", "demo_report", "--json"],
+        &[("CERCIS_GLOBAL_PLUGINS", &g)],
+    );
+
+    // 随包插件（没有安装记录）不能删除，但给了"不启用"的两条路
     let (code, _o, err) = run(
         &["market", "uninstall", "--id", "health_check"],
         &[("CERCIS_GLOBAL_PLUGINS", &g)],
     );
     assert_ne!(code, 0);
-    assert!(err.contains("随包插件不能物理删除"), "{err}");
+    assert!(err.contains("没有市场安装记录"), "{err}");
+    assert!(err.contains("block") && err.contains("disable"), "要指路：{err}");
+}
+
+#[test]
+fn market_add_and_remove_follow_d42() {
+    let dir = tmp("market-entry");
+    let global = dir.join("global");
+    let g = global.display().to_string();
+
+    // 基础市场不可移除
+    let (code, _o, err) = run(&["market", "remove", "--id", "basic"], &[("CERCIS_GLOBAL_PLUGINS", &g)]);
+    assert_ne!(code, 0);
+    assert!(err.contains("随 app 交付"), "{err}");
+
+    // 科研市场可移除，也能用 --preset 找回来
+    ok(&["market", "remove", "--id", "research", "--json"], &[("CERCIS_GLOBAL_PLUGINS", &g)]);
+    let after = ok(&["market", "list", "--json"], &[("CERCIS_GLOBAL_PLUGINS", &g)]);
+    assert!(
+        after["markets"].as_array().unwrap().iter().all(|m| m["id"] != "research"),
+        "{after}"
+    );
+    ok(&["market", "add", "--preset", "research", "--json"], &[("CERCIS_GLOBAL_PLUGINS", &g)]);
+    let back = ok(&["market", "list", "--json"], &[("CERCIS_GLOBAL_PLUGINS", &g)]);
+    assert!(back["markets"].as_array().unwrap().iter().any(|m| m["id"] == "research"));
+
+    // 自建 / 私有仓库：能加能删
+    ok(
+        &[
+            "market", "add", "--repository", "https://git.example.com/team/market",
+            "--label", "团队私有市场", "--json",
+        ],
+        &[("CERCIS_GLOBAL_PLUGINS", &g)],
+    );
+    let with_private = ok(&["market", "list", "--json"], &[("CERCIS_GLOBAL_PLUGINS", &g)]);
+    let private = with_private["markets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["repository"] == "https://git.example.com/team/market")
+        .expect("私有市场应在列表里");
+    assert_eq!(private["bundled"], false);
+    ok(
+        &["market", "remove", "--id", private["id"].as_str().unwrap(), "--json"],
+        &[("CERCIS_GLOBAL_PLUGINS", &g)],
+    );
+}
+
+#[test]
+fn bundled_plugin_from_basic_market_cannot_be_deleted() {
+    // 从随包市场（bundled: true）装进来的插件，同样不许删除——只能停用/屏蔽
+    let dir = tmp("bundled-install");
+    let g = dir.join("global").display().to_string();
+    let repo = dir.join("downloaded");
+    for id in ["health_check"] {
+        let p = repo.join("plugins").join(id);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(
+            p.join("plugin.yaml"),
+            format!("id: {id}\nnamespace: health\nname: Health\nversion: 0.1.0\ntier: basic\n"),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        repo.join("marketplace.json"),
+        r#"{"schema": "cercis.marketplace/1", "name": "基础工具包", "bundled": true,
+            "repository": "https://github.com/epigrove/cercis-kits-basic",
+            "plugins": [{"id": "health_check", "name": "Health", "path": "plugins/health_check",
+                          "version": "0.1.0", "tier": "basic", "requires_plugin_api": 1}]}"#,
+    )
+    .unwrap();
+    ok(
+        &[
+            "market", "install", "--from", &repo.display().to_string(), "--plugin", "health_check",
+            "--market", "basic", "--json",
+        ],
+        &[("CERCIS_GLOBAL_PLUGINS", &g)],
+    );
+    let (code, _o, err) = run(
+        &["market", "uninstall", "--id", "health_check"],
+        &[("CERCIS_GLOBAL_PLUGINS", &g)],
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("不删除"), "{err}");
+    assert!(dir.join("global/health_check").exists(), "随包插件的文件要留着");
 }
