@@ -596,6 +596,8 @@ pub fn merge(pack_dir: &Path, into: &Path, opts: &MergeOptions) -> Result<MergeR
             into.display()
         )));
     }
+    // 多人项目里，合并会写数据 → 至少要是"编辑者"
+    crate::accounts::require(into, crate::accounts::Role::Editor)?;
 
     // 1) 先校验（FR-I03）：一个文件对不上就整包拒绝，不猜
     let mut bad = Vec::new();

@@ -26,13 +26,15 @@ Cercis 内核：**行业普适的"文件夹即数据库"引擎**。
   （冲突留双方副本、本地永不覆盖、校验先过）、分享守卫（白名单 + 合成标记 + 隐私清单）
 - [x] **NAS 与工作副本**（FR-N01–N07）：网络位置登记与体检、写租约、凭据进钥匙串、
   工作副本离线记录与双向同步（复用 pack/merge）、同步状态面板；云盘/Git 共存体检
+- [x] **多人账户与权限分级**（FR-N08/N09/N11）：账户只存加盐哈希、开放模式、查看者/编辑者/管理员
+  三档角色在内核层设闸、越权写 `denied` 流水、`plugins.admin_only_edit` 真正生效
 - [x] 命令行（`cercis`，含 `--json`）
 
 ## 构建与测试（作者自测）
 
 ```bash
 cd kernel
-cargo test          # 运行测试（168 个：117 单元 + 51 端到端/集成，其中 S11 加密 10、S12 打包合并 10、NAS/工作副本 9）
+cargo test          # 运行测试（178 个：122 单元 + 56 端到端/集成，含 S11 加密、S12 打包合并、NAS/工作副本、账户与权限）
 cargo build         # 构建内核与命令行
 cargo run -p cercis-cli -- --help
 ```
@@ -83,6 +85,13 @@ cercis workcopy sync ~/试验-工作副本                                  # �
 
 # 共存体检（FR-I06）：云盘 / Git 目录里用会不会分叉
 cercis sync <目录>
+
+# 多人账户与权限分级（FR-N08/N09/N11）：只存加盐哈希；没有账户文件就是开放模式
+cercis account add <目录> --id alice --name 张老师 --role admin --password-env PW
+cercis account login <目录> --id alice --password-env PW      # 登录态在本机用户目录，不进项目
+cercis account whoami <目录> / cercis account logout <目录>
+cercis account role <目录> --id bob --role editor             # 要管理员；不能删/降最后一个管理员
+# 角色闸门在内核层：查看者只读；编辑者能写数据；管理员才能改结构/插件/加密区域/账户；越权写 denied 流水
 ```
 
 > 加密细节（算法、文件格式、密钥世代、历史快照迁移）见需求文档 §12.5.1 与 D47–D49；

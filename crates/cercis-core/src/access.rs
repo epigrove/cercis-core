@@ -926,6 +926,8 @@ pub fn create_zone(
     encrypt_now: bool,
     keep_plaintext: bool,
 ) -> Result<(Zone, Option<ZoneApplyReport>)> {
+    // 划加密区域是结构性改动：多人项目里要管理员
+    crate::accounts::require(root, crate::accounts::Role::Admin)?;
     if !is_valid_id(name) {
         return Err(CercisError::Invalid(format!(
             "区域名需为小写 ASCII 字母数字/下划线/短横线（如 patent-data）: {name:?}"
@@ -1022,6 +1024,7 @@ pub fn grant(
     permission: Permission,
     actor: Option<&str>,
 ) -> Result<Zone> {
+    crate::accounts::require(root, crate::accounts::Role::Admin)?;
     let session = require_session(root, actor)?;
     let mut zones = Zones::load(root)?;
     let zone = zones
@@ -1088,6 +1091,7 @@ pub fn revoke(
     member: &str,
     actor: Option<&str>,
 ) -> Result<RevokeReport> {
+    crate::accounts::require(root, crate::accounts::Role::Admin)?;
     let session = require_session(root, actor)?;
     let mut zones = Zones::load(root)?;
     let zone = zones
@@ -1453,6 +1457,7 @@ pub fn apply(
     dry_run: bool,
     keep_plaintext: bool,
 ) -> Result<Vec<ZoneApplyReport>> {
+    crate::accounts::require(root, crate::accounts::Role::Admin)?;
     let session = require_session(root, member)?;
     let zones = Zones::load(root)?;
     let mut out = Vec::new();

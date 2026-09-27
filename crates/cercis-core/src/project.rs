@@ -180,6 +180,7 @@ impl Project {
 
     /// 安装/替换术语包：写 `<项目>/terms.yaml`，**不动任何数据**。
     pub fn install_terms(&self, terms: &crate::Terms) -> Result<()> {
+        crate::accounts::require(self.root(), crate::accounts::Role::Admin)?;
         terms.save(self.root())?;
         self.store.append_change(&crate::history::ChangeEntry::new(
             &self.store.identity.user_id,
@@ -202,6 +203,7 @@ impl Project {
     ///
     /// 返回新建的表名列表。
     pub fn install_template(&self, t: &Template) -> Result<Vec<String>> {
+        crate::accounts::require(self.root(), crate::accounts::Role::Admin)?;
         t.validate()?;
         self.store.save_template(t)?;
         let created = self.store.ensure_tables_from_template(t)?;

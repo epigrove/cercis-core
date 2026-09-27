@@ -149,6 +149,7 @@ impl Store {
     /// - `action`：create / update / restore ……
     /// - `summary`：一句话说明（写入流水）
     pub fn save_table(&self, table: &Table, action: &str, summary: &str) -> Result<String> {
+        crate::accounts::require(&self.root, crate::accounts::Role::Editor)?;
         let before = self.read_stored(table.path())?;
         let hash_before = before
             .as_ref()
@@ -348,6 +349,8 @@ impl Store {
         source_ref: &str,
         batch_id: &str,
     ) -> Result<String> {
+        // 多人项目（有账户）里，写数据至少要是"编辑者"；开放模式一律放行
+        crate::accounts::require(&self.root, crate::accounts::Role::Editor)?;
         let table_name = table
             .path()
             .file_stem()
@@ -561,6 +564,8 @@ impl Store {
         target: impl AsRef<std::path::Path>,
         summary: &str,
     ) -> Result<()> {
+        // 回滚也是写入（回滚 = 新增一次变更）→ 至少要是编辑者
+        crate::accounts::require(&self.root, crate::accounts::Role::Editor)?;
         let bytes = self.read_object(hash)?;
         let text = String::from_utf8(bytes).map_err(|e| {
             CercisError::Corrupt(format!("历史对象不是合法 UTF-8: {hash}（{e}）"))

@@ -141,6 +141,9 @@ impl AiContract {
             cmd("cercis workcopy create <主副本> --to <本地目录>", "建工作副本（推荐通道）：本地离线记录，联网后双向合并", "cercis workcopy create /Volumes/lab-nas/试验 --to ~/试验-工作副本 --name nas"),
             cmd("cercis workcopy status <本地副本>", "同步状态（FR-N07）：本地/主副本各有多少新变更、上次同步时间、待处理冲突", "cercis workcopy status ~/试验-工作副本 --json"),
             cmd("cercis workcopy sync <本地副本>", "双向同步（拉回来 + 推上去，都是并集；断网会明确报离线）", "cercis workcopy sync ~/试验-工作副本 --dry-run --json"),
+            cmd("cercis account add <项目> --id alice --role admin", "启用多人账户（第一个必须是管理员）：只存加盐哈希，没有账户文件就是开放模式", "cercis account add ./项目 --id alice --name 张老师 --role admin --password-env PW"),
+            cmd("cercis account login <项目> --id alice", "登录（登录态存本机用户目录，不进项目）；有账户后：查看者只读、编辑者能写数据、管理员才能改结构与插件", "cercis account login ./项目 --id alice --password-env PW"),
+            cmd("cercis account list/role/remove", "账户与角色管理（改角色/删账户要管理员；越权会被拒绝并写 denied 流水）", "cercis account list ./项目 --json"),
             cmd("cercis agents <项目>", "刷新 AI 材料与 Agent 技能包", "cercis agents ./项目"),
             cmd("cercis skill <项目>", "生成 Agent 技能包（--install codex|claude 可直接装）", "cercis skill ./项目 --install codex"),
         ];

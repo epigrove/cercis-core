@@ -35,6 +35,7 @@
 //! 3. 可移植：不用本工具，仅靠 CSV/媒体文件也能理解并使用数据。
 
 pub mod access;
+pub mod accounts;
 pub mod ai;
 pub mod config;
 pub mod crypto;
@@ -72,6 +73,7 @@ pub use ai::{AgentSkill, AiContract};
 pub use access::{
     AccessStatus, ExportReport, Members, Permission, Session, Zone, ZoneApplyReport, Zones,
 };
+pub use accounts::{Account, Accounts, Role};
 pub use config::ProjectConfig;
 pub use desired::{Desired, DesiredDiff, WantedPlugin};
 pub use error::{CercisError, Result};

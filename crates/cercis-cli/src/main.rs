@@ -97,6 +97,8 @@ enum Command {
     Remote(RemoteArgs),
     /// 工作副本：本地离线记录，联网后双向合并（FR-N03 / FR-N07）
     Workcopy(WorkcopyArgs),
+    /// 多人账户与权限分级（FR-N08/N09）：账户、登录、角色
+    Account(AccountArgs),
     /// 内核信息
     Version,
 }
@@ -495,6 +497,90 @@ enum MarketAction {
         /// 分支 / 标签 / 提交
         #[arg(long = "ref", default_value = "")]
         git_ref: String,
+    },
+}
+
+#[derive(Args, Debug)]
+struct AccountArgs {
+    #[command(subcommand)]
+    action: AccountAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum AccountAction {
+    /// 新建账户（第一个必须是管理员；口令只存加盐哈希）
+    Add {
+        path: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value = "")]
+        name: String,
+        /// viewer / editor / admin
+        #[arg(long, default_value = "editor")]
+        role: String,
+        #[arg(long)]
+        password_stdin: bool,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+        #[arg(long)]
+        password_env: Option<String>,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// 列出账户（看不到口令，只有角色）
+    List { path: PathBuf },
+    /// 登录（登录态存本机用户目录，不进项目）
+    Login {
+        path: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        password_stdin: bool,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+        #[arg(long)]
+        password_env: Option<String>,
+        /// 登录有效小时数（默认 12）
+        #[arg(long, default_value_t = 12)]
+        ttl: i64,
+    },
+    /// 我现在是谁、什么角色
+    Whoami { path: PathBuf },
+    /// 退出登录（清掉本机登录态）
+    Logout { path: PathBuf },
+    /// 改口令（自己知道旧口令就行）
+    Passwd {
+        path: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        old_password_file: Option<PathBuf>,
+        #[arg(long)]
+        old_password_env: Option<String>,
+        #[arg(long)]
+        new_password_file: Option<PathBuf>,
+        #[arg(long)]
+        new_password_env: Option<String>,
+    },
+    /// 改角色（要管理员）
+    Role {
+        path: PathBuf,
+        #[arg(long)]
+        id: String,
+        /// viewer / editor / admin
+        #[arg(long)]
+        role: String,
+        /// 以哪位管理员的名义（没登录时用）
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
+    /// 删账户（要管理员；不能删掉最后一个管理员）
+    Remove {
+        path: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long = "as")]
+        actor: Option<String>,
     },
 }
 
@@ -1448,6 +1534,21 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         }
 
         Command::Plugins(a) => {
+            // 改插件（不是看插件）要过 FR-N11 的闸门：
+            // 项目开了 plugins.admin_only_edit 时只有管理员能动
+            let mutating = matches!(
+                a.action.as_ref(),
+                Some(PluginsAction::Register(_))
+                    | Some(PluginsAction::Unregister(_))
+                    | Some(PluginsAction::Disable(_))
+                    | Some(PluginsAction::Enable(_))
+                    | Some(PluginsAction::Block(_))
+                    | Some(PluginsAction::Unblock(_))
+                    | Some(PluginsAction::Reconcile(_))
+            );
+            if mutating {
+                cercis_core::accounts::require_plugin_edit(&a.path)?;
+            }
             let found = cercis_core::plugin::discover(&a.path, a.global_dir.as_deref())?;
             let trust = cercis_core::TrustRecord::load(&a.path)?;
             let state = cercis_core::plugin::PluginState::load(&a.path)?;
@@ -2057,6 +2158,7 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         }
 
         Command::Trust(a) => {
+            cercis_core::accounts::require_plugin_edit(&a.path)?;
             let found = cercis_core::plugin::discover(&a.path, None)?;
             let target = found
                 .iter()
@@ -2100,6 +2202,8 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         }
 
         Command::DropTable(a) => {
+            // 删表是结构性改动 → 管理员
+            cercis_core::accounts::require(&a.path, cercis_core::Role::Admin)?;
             let p = Project::open(&a.path, None)?;
             if a.dry_run {
                 let path = p.root().join("tables").join(format!("{}.csv", a.table));
@@ -2156,6 +2260,7 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         Command::Sync(a) => sync_cmd(a, cli.json)?,
         Command::Remote(a) => remote_cmd(a, cli.json)?,
         Command::Workcopy(a) => workcopy_cmd(a, cli.json)?,
+        Command::Account(a) => account_cmd(a, cli.json)?,
 
         Command::Validate(a) => {
             let p = Project::open(&a.path, None)?;
@@ -2380,6 +2485,8 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         }
 
         Command::SetFieldType(a) => {
+            // 改字段类型是结构性改动 → 管理员
+            cercis_core::accounts::require(&a.path, cercis_core::Role::Admin)?;
             let p = Project::open(&a.path, None)?;
             let patch = build_field_patch(a)?;
             if patch.is_empty() {
@@ -2852,6 +2959,201 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         }
     }
     Ok(())
+}
+
+/// 多人账户与权限分级（FR-N08/N09）：账户、登录、角色。
+fn account_cmd(a: &AccountArgs, json_out: bool) -> Result<(), CercisError> {
+    use cercis_core::{accounts, Role};
+
+    match &a.action {
+        AccountAction::Add {
+            path,
+            id,
+            name,
+            role,
+            password_stdin,
+            password_file,
+            password_env,
+            note,
+        } => {
+            let password = read_password_arg(*password_stdin, password_file, password_env, "口令")?;
+            let acc = accounts::add(
+                path,
+                id,
+                name,
+                Role::parse(role)?,
+                &password,
+                cercis_core::crypto::KdfParams::from_env(),
+                note,
+            )?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1", "ok": true,
+                    "account": { "id": acc.id, "display_name": acc.display_name, "role": acc.role },
+                }));
+            } else {
+                println!("已建账户 {}（{}）", acc.id, acc.role.label_cn());
+                println!("  项目里只存加盐哈希，没有明文口令。");
+                println!("  现在起这个项目要求登录：cercis account login {} --id {}", path.display(), acc.id);
+            }
+            Ok(())
+        }
+        AccountAction::List { path } => {
+            let list = accounts::list(path)?;
+            let session = accounts::current(path)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "enabled": !list.is_empty(),
+                    "whoami": session.map(|s| serde_json::json!({
+                        "id": s.id, "role": s.role, "expires": s.expires,
+                    })),
+                    "accounts": list.iter().map(|a| serde_json::json!({
+                        "id": a.id, "display_name": a.display_name,
+                        "role": a.role, "created": a.created, "note": a.note,
+                    })).collect::<Vec<_>>(),
+                }));
+            } else if list.is_empty() {
+                println!("这个项目还没有账户（开放模式：不限制）。");
+                println!("  要启用多人协作：cercis account add <项目> --id alice --role admin");
+            } else {
+                println!("账户（{} 个）：", list.len());
+                for a in &list {
+                    println!(
+                        "  {:<12} {:<10} {}{}",
+                        a.id,
+                        a.role.label_cn(),
+                        if a.display_name.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  {}", a.display_name)
+                        },
+                        if a.note.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  （{}）", a.note)
+                        }
+                    );
+                }
+                match session {
+                    Some(s) => println!("\n当前身份：{}（{}，到 {}）", s.id, s.role.label_cn(), s.expires),
+                    None => println!("\n当前未登录（登录：cercis account login <项目> --id <账户>）"),
+                }
+            }
+            Ok(())
+        }
+        AccountAction::Login {
+            path,
+            id,
+            password_stdin,
+            password_file,
+            password_env,
+            ttl,
+        } => {
+            let password = read_password_arg(*password_stdin, password_file, password_env, "口令")?;
+            let s = accounts::login(
+                path,
+                id,
+                &password,
+                cercis_core::crypto::KdfParams::from_env(),
+                *ttl,
+            )?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1", "ok": true,
+                    "id": s.id, "role": s.role, "expires": s.expires,
+                }));
+            } else {
+                println!("已登录：{}（{}），到 {}", s.id, s.role.label_cn(), s.expires);
+                println!("  登录态存在本机用户目录，不进项目；退出：cercis account logout {}", path.display());
+            }
+            Ok(())
+        }
+        AccountAction::Whoami { path } => {
+            let session = accounts::current(path)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "whoami": session.map(|s| serde_json::json!({
+                        "id": s.id, "role": s.role, "expires": s.expires,
+                    })),
+                }));
+            } else {
+                match session {
+                    Some(s) => println!("我是 {}（{}），登录到 {}", s.id, s.role.label_cn(), s.expires),
+                    None => println!("当前未登录（开放模式下不影响使用）。"),
+                }
+            }
+            Ok(())
+        }
+        AccountAction::Logout { path } => {
+            let removed = accounts::logout(path)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1", "ok": true, "logged_out": removed,
+                }));
+            } else {
+                println!("{}", if removed { "已退出登录。" } else { "本来就没登录。" });
+            }
+            Ok(())
+        }
+        AccountAction::Passwd {
+            path,
+            id,
+            old_password_file,
+            old_password_env,
+            new_password_file,
+            new_password_env,
+        } => {
+            let old = read_password_arg(false, old_password_file, old_password_env, "旧口令")?;
+            let new = read_password_arg(false, new_password_file, new_password_env, "新口令")?;
+            accounts::change_password(
+                path,
+                id,
+                &old,
+                &new,
+                cercis_core::crypto::KdfParams::from_env(),
+            )?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1", "ok": true, "id": id,
+                }));
+            } else {
+                println!("已改 {id} 的口令（还是只存哈希）。");
+            }
+            Ok(())
+        }
+        AccountAction::Role {
+            path,
+            id,
+            role,
+            actor,
+        } => {
+            let acc = accounts::set_role(path, id, Role::parse(role)?, actor.as_deref())?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1", "ok": true,
+                    "id": acc.id, "role": acc.role,
+                }));
+            } else {
+                println!("已把 {} 设为{}", acc.id, acc.role.label_cn());
+            }
+            Ok(())
+        }
+        AccountAction::Remove { path, id, actor } => {
+            accounts::remove(path, id, actor.as_deref())?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1", "ok": true, "removed": id,
+                }));
+            } else {
+                println!("已删除账户 {id}");
+            }
+            Ok(())
+        }
+    }
 }
 
 /// NAS / 网络位置（FR-N01–N06）：登记、体检、写租约、凭据进钥匙串。
