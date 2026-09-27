@@ -91,6 +91,8 @@ enum Command {
     Merge(MergeArgs),
     /// 分享守卫：扫一遍"能不能发出去"（白名单 + 真实数据拦截 + 隐私清单；S12）
     Guard(GuardArgs),
+    /// 共存体检：云盘 / Git 目录里用会不会分叉，有没有已经分叉的迹象（FR-I06）
+    Sync(SyncArgs),
     /// 内核信息
     Version,
 }
@@ -490,6 +492,12 @@ enum MarketAction {
         #[arg(long = "ref", default_value = "")]
         git_ref: String,
     },
+}
+
+#[derive(Args, Debug)]
+struct SyncArgs {
+    /// 项目目录（也可以在云盘/Git 目录里）
+    path: PathBuf,
 }
 
 #[derive(Args, Debug)]
@@ -2019,6 +2027,7 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         Command::Pack(a) => pack_cmd(a, cli.json)?,
         Command::Merge(a) => merge_cmd(a, cli.json)?,
         Command::Guard(a) => guard_cmd(a, cli.json)?,
+        Command::Sync(a) => sync_cmd(a, cli.json)?,
 
         Command::Validate(a) => {
             let p = Project::open(&a.path, None)?;
@@ -2712,6 +2721,54 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
             } else {
                 println!("已还原到 {}", a.to.display());
             }
+        }
+    }
+    Ok(())
+}
+
+/// 共存体检（S13 / FR-I06）：云盘 / Git 目录里的分叉风险与已经分叉的迹象。
+fn sync_cmd(a: &SyncArgs, json_out: bool) -> Result<(), CercisError> {
+    let rep = cercis_core::sync::check(&a.path)?;
+    if json_out {
+        print_json(&serde_json::json!({
+            "schema": "cercis.cli/1",
+            "ok": rep.verdict != "needs-merge",
+            "verdict": rep.verdict,
+            "cloud": rep.cloud,
+            "git": rep.git,
+            "findings": rep.findings,
+            "notes": rep.notes,
+            "summary": rep.summary(),
+        }));
+    } else {
+        println!("{}", rep.summary());
+        if !rep.cloud.is_empty() {
+            println!("  云盘：{}", rep.cloud);
+        }
+        if let Some(g) = &rep.git {
+            println!(
+                "  Git：{}（分支 {}{}）",
+                g.repo_root,
+                g.branch,
+                if g.dirty_files >= 0 {
+                    format!("，未提交 {} 个文件", g.dirty_files)
+                } else {
+                    String::new()
+                }
+            );
+        }
+        for f in &rep.findings {
+            println!("  - {}（{}）：{}", f.path, f.kind, f.detail);
+            println!("      建议：{}", f.advice);
+        }
+        for n in &rep.notes {
+            println!("  注：{n}");
+        }
+        if rep.verdict == "needs-merge" {
+            println!(
+                "\n收拢办法：把要保留的一边作为主项目，另一边用 `cercis pack` 打包，\
+                 再 `cercis merge <包目录> --into <主项目>`；合并只增不改，两边的新记录都会留下。"
+            );
         }
     }
     Ok(())

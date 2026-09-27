@@ -134,6 +134,7 @@ impl AiContract {
             cmd("cercis pack <项目> --out <目录>", "打包带走（可增量、可分卷；加密区域保持密文；默认每卷 20 MB 适配微信）", "cercis pack ./项目 --out /tmp/我的包 --part-size-mb 20 --json"),
             cmd("cercis merge <包目录> --into <项目>", "合并一个包：先校验指纹，再**并集**合并（两边的记录都留）；两边都改过的文件保留双方副本；本地文件永不被覆盖", "cercis merge /tmp/我的包 --into ./项目 --dry-run --json"),
             cmd("cercis guard <目录>", "分享守卫（红线：发布零数据）：逐文件判定能不能发出去，并列出隐私线索（邮箱/手机号/身份证/经纬度/自定义关键词）", "cercis guard . --keyword 未公开配方 --json"),
+            cmd("cercis sync <项目>", "共存体检：项目在云盘/Git 目录里有没有分叉风险，有没有已经分叉的迹象（云盘冲突副本、残留临时文件、iCloud 占位符）", "cercis sync ./项目 --json"),
             cmd("cercis agents <项目>", "刷新 AI 材料与 Agent 技能包", "cercis agents ./项目"),
             cmd("cercis skill <项目>", "生成 Agent 技能包（--install codex|claude 可直接装）", "cercis skill ./项目 --install codex"),
         ];
