@@ -93,6 +93,10 @@ enum Command {
     Guard(GuardArgs),
     /// 共存体检：云盘 / Git 目录里用会不会分叉，有没有已经分叉的迹象（FR-I06）
     Sync(SyncArgs),
+    /// NAS / 网络位置：登记、体检、写租约、凭据进钥匙串（FR-N01–N06）
+    Remote(RemoteArgs),
+    /// 工作副本：本地离线记录，联网后双向合并（FR-N03 / FR-N07）
+    Workcopy(WorkcopyArgs),
     /// 内核信息
     Version,
 }
@@ -491,6 +495,128 @@ enum MarketAction {
         /// 分支 / 标签 / 提交
         #[arg(long = "ref", default_value = "")]
         git_ref: String,
+    },
+}
+
+#[derive(Args, Debug)]
+struct RemoteArgs {
+    #[command(subcommand)]
+    action: RemoteAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum RemoteAction {
+    /// 登记一个网络位置（填**挂载后的本地路径**；SMB/WebDAV/SFTP 由系统或 app 挂载）
+    Add {
+        /// 项目目录
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+        /// 挂载后的本地路径，如 /Volumes/lab-nas
+        #[arg(long = "path", value_name = "挂载路径")]
+        path_on_nas: String,
+        /// 方式：smb / webdav / sftp / nfs / local（留空按路径猜）
+        #[arg(long, default_value = "")]
+        kind: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// 列出已登记的网络位置
+    List { path: PathBuf },
+    /// 移除登记（不动任何文件；钥匙串里的凭据一起删）
+    Remove {
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
+    /// 网络目录体检（FR-N06）：可达、可写、原子改名、大小写、中文名、速度
+    Test {
+        /// 项目目录
+        path: PathBuf,
+        /// 已登记的远程名（或直接给一个路径）
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// 取写租约：告诉别的设备"我在写"
+    Claim {
+        path: PathBuf,
+        /// 谁在哪台设备上写，如 wenhuan@laptop
+        #[arg(long)]
+        who: String,
+        #[arg(long, default_value_t = 30)]
+        minutes: i64,
+    },
+    /// 释放写租约（顺手清掉已过期的）
+    Release {
+        path: PathBuf,
+        #[arg(long)]
+        who: String,
+    },
+    /// 凭据管理：存进系统钥匙串，**绝不写进项目**
+    Credential {
+        #[command(subcommand)]
+        action: CredentialAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CredentialAction {
+    /// 存入（口令来源：--password-env / --password-file / 标准输入）
+    Set {
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        password_stdin: bool,
+        #[arg(long)]
+        password_file: Option<PathBuf>,
+        #[arg(long)]
+        password_env: Option<String>,
+    },
+    /// 看有没有存过
+    Has {
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
+    /// 删掉
+    Delete {
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
+}
+
+#[derive(Args, Debug)]
+struct WorkcopyArgs {
+    #[command(subcommand)]
+    action: WorkcopyAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum WorkcopyAction {
+    /// 从主副本拉一份工作副本到本地（离线也能记）
+    Create {
+        /// 主副本（NAS 上的项目）
+        main: PathBuf,
+        /// 本地副本目录（必须为空或不存在）
+        #[arg(long)]
+        to: PathBuf,
+        /// 用哪个远程名（可留空）
+        #[arg(long, default_value = "")]
+        name: String,
+    },
+    /// 同步状态：本地/主副本各有多少新变更、上次同步、冲突（FR-N07）
+    Status {
+        /// 本地副本目录
+        copy: PathBuf,
+    },
+    /// 双向同步：拉回来 + 推上去（断网会明确报离线）
+    Sync {
+        /// 本地副本目录
+        copy: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -2028,6 +2154,8 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         Command::Merge(a) => merge_cmd(a, cli.json)?,
         Command::Guard(a) => guard_cmd(a, cli.json)?,
         Command::Sync(a) => sync_cmd(a, cli.json)?,
+        Command::Remote(a) => remote_cmd(a, cli.json)?,
+        Command::Workcopy(a) => workcopy_cmd(a, cli.json)?,
 
         Command::Validate(a) => {
             let p = Project::open(&a.path, None)?;
@@ -2724,6 +2852,266 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         }
     }
     Ok(())
+}
+
+/// NAS / 网络位置（FR-N01–N06）：登记、体检、写租约、凭据进钥匙串。
+fn remote_cmd(a: &RemoteArgs, json_out: bool) -> Result<(), CercisError> {
+    use cercis_core::remote;
+
+    match &a.action {
+        RemoteAction::Add {
+            path,
+            name,
+            path_on_nas,
+            kind,
+            note,
+        } => {
+            let rec = remote::add(path, name, kind, path_on_nas, note)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1", "ok": true, "remote": rec,
+                }));
+            } else {
+                println!("已登记网络位置 {} → {}（{}）", rec.name, rec.path, rec.kind);
+                println!("  体检：cercis remote test {} --name {}", path.display(), rec.name);
+                println!("  口令请用 remote credential set 存进系统钥匙串，不要写进项目。");
+            }
+            Ok(())
+        }
+        RemoteAction::List { path } => {
+            let list = remote::list(path)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1", "ok": true, "remotes": list,
+                }));
+            } else if list.is_empty() {
+                println!("还没有登记网络位置。");
+                println!("  加一个：cercis remote add <项目> --name nas --path /Volumes/lab-nas");
+            } else {
+                println!("网络位置（{} 个）：", list.len());
+                for r in &list {
+                    let cred = if r.credential_account.is_empty() {
+                        String::new()
+                    } else {
+                        "  （凭据在钥匙串）".to_string()
+                    };
+                    let note = if r.note.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {}", r.note)
+                    };
+                    println!("  {:<10} {:<42} {:<8}{note}{cred}", r.name, r.path, r.kind);
+                }
+            }
+            Ok(())
+        }
+        RemoteAction::Remove { path, name } => {
+            let rec = remote::remove(path, name)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1", "ok": true, "removed": rec.name,
+                }));
+            } else {
+                println!("已移除网络位置 {}（文件一个没动）", rec.name);
+            }
+            Ok(())
+        }
+        RemoteAction::Test { path, name } => {
+            let target = match name {
+                Some(n) => n.clone(),
+                None => match remote::list(path)?.first() {
+                    Some(r) => r.name.clone(),
+                    None => path.display().to_string(),
+                },
+            };
+            let t = remote::test(path, &target)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": t.reachable && t.readable,
+                    "test": t,
+                }));
+            } else {
+                println!("{}", t.summary());
+                if t.is_project {
+                    println!("  这个位置本身就是一个 Cercis 项目");
+                }
+                for f in &t.findings {
+                    println!("  - {f}");
+                }
+                for c in &t.conflicts {
+                    println!("  ⚠ 分叉迹象：{c}");
+                }
+            }
+            Ok(())
+        }
+        RemoteAction::Claim {
+            path,
+            who,
+            minutes,
+        } => {
+            let msg = remote::claim(path, who, *minutes)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1", "ok": true, "who": who, "minutes": minutes,
+                }));
+            } else {
+                println!("{msg}");
+            }
+            Ok(())
+        }
+        RemoteAction::Release { path, who } => {
+            let n = remote::release(path, who)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1", "ok": true, "cleared": n,
+                }));
+            } else {
+                println!("已清掉 {n} 个租约（自己的 + 已过期的）");
+            }
+            Ok(())
+        }
+        RemoteAction::Credential { action } => match action {
+            CredentialAction::Set {
+                path,
+                name,
+                password_stdin,
+                password_file,
+                password_env,
+            } => {
+                let secret =
+                    read_password_arg(*password_stdin, password_file, password_env, "远程凭据")?;
+                let account = remote::credential_set(path, name, &secret)?;
+                if json_out {
+                    print_json(&serde_json::json!({
+                        "schema": "cercis.cli/1", "ok": true,
+                        "remote": name, "keychain_account": account,
+                    }));
+                } else {
+                    println!("凭据已存进系统钥匙串：{account}");
+                    println!("  项目文件里没有口令（access/remotes.yaml 只记钥匙串账号）。");
+                }
+                Ok(())
+            }
+            CredentialAction::Has { path, name } => {
+                let has = remote::credential_has(path, name)?;
+                if json_out {
+                    print_json(&serde_json::json!({
+                        "schema": "cercis.cli/1", "ok": true,
+                        "remote": name, "stored": has,
+                    }));
+                } else {
+                    println!(
+                        "{}",
+                        if has {
+                            format!("{name} 的凭据在钥匙串里")
+                        } else {
+                            format!("钥匙串里没有 {name} 的凭据")
+                        }
+                    );
+                }
+                Ok(())
+            }
+            CredentialAction::Delete { path, name } => {
+                let removed = remote::credential_delete(path, name)?;
+                if json_out {
+                    print_json(&serde_json::json!({
+                        "schema": "cercis.cli/1", "ok": true,
+                        "remote": name, "removed": removed,
+                    }));
+                } else {
+                    println!(
+                        "{}",
+                        if removed {
+                            format!("已删掉 {name} 的凭据")
+                        } else {
+                            format!("钥匙串里本来就没有 {name} 的凭据")
+                        }
+                    );
+                }
+                Ok(())
+            }
+        },
+    }
+}
+
+/// 工作副本（FR-N03 / FR-N07）：建、看状态、双向同步。
+fn workcopy_cmd(a: &WorkcopyArgs, json_out: bool) -> Result<(), CercisError> {
+    use cercis_core::remote;
+
+    match &a.action {
+        WorkcopyAction::Create { main, to, name } => {
+            let wc = remote::workcopy_create(main, to, name)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1", "ok": true, "workcopy": wc,
+                }));
+            } else {
+                println!("已建工作副本：{}", to.display());
+                println!("  主副本：{}", wc.main);
+                println!("  断网也能记；联网后：cercis workcopy sync {}", to.display());
+                println!("  看两边差多少：cercis workcopy status {}", to.display());
+            }
+            Ok(())
+        }
+        WorkcopyAction::Status { copy } => {
+            let st = remote::workcopy_status(copy)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "offline": st.verdict == "offline",
+                    "status": st,
+                }));
+            } else {
+                println!("{}", st.summary());
+                match st.verdict.as_str() {
+                    "ok" => println!("  两边一致，不用同步。"),
+                    "needs-sync" => println!("  要同步：cercis workcopy sync {}", copy.display()),
+                    _ => println!("  主副本不可达（离线）：本地照记，联网后再同步。"),
+                }
+                for c in &st.conflicts {
+                    println!("  ⚠ 冲突副本待处理：{c}");
+                }
+                for n in &st.notes {
+                    println!("  注：{n}");
+                }
+            }
+            Ok(())
+        }
+        WorkcopyAction::Sync { copy, dry_run } => {
+            let rep = remote::workcopy_sync(copy, *dry_run)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "dry_run": rep.dry_run,
+                    "summary": rep.summary(),
+                    "conflicts_total": rep.conflicts_total,
+                    "pulled_added": rep.pulled.added,
+                    "pushed_added": rep.pushed.added,
+                    "pulled_merged": rep.pulled.merged,
+                    "pushed_merged": rep.pushed.merged,
+                    "notes": rep.notes,
+                }));
+            } else {
+                println!("{}", rep.summary());
+                if rep.dry_run {
+                    println!("（试运行：两边都没改）");
+                }
+                for m in &rep.pulled.merged {
+                    println!("  拉回来：{} 新增 {} 行", m.table, m.added_rows);
+                }
+                for m in &rep.pushed.merged {
+                    println!("  推上去：{} 新增 {} 行", m.table, m.added_rows);
+                }
+                for n in &rep.notes {
+                    println!("  注：{n}");
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 /// 共存体检（S13 / FR-I06）：云盘 / Git 目录里的分叉风险与已经分叉的迹象。

@@ -52,6 +52,7 @@ pub mod market;
 pub mod plugin;
 pub mod project;
 pub mod query;
+pub mod remote;
 pub mod registry;
 pub mod store;
 pub mod sync;
@@ -81,6 +82,7 @@ pub use market::{Installs, MarketEntry, MarketPlugin, Marketplace, UserMarkets, 
 pub use plugin::{DiscoveredPlugin, PluginManifest, TrustRecord, PLUGIN_API_VERSION};
 pub use project::Project;
 pub use query::{Condition, Op, Query, SortDir, SortKey};
+pub use remote::{Remote, Remotes, WorkCopy, WorkCopyStatus, WorkCopySync};
 pub use registry::{RegKind, RegState, Registration, Registry};
 pub use store::{AppendOutcome, Identity, Store};
 pub use sync::SyncReport;

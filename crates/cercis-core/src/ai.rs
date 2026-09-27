@@ -135,6 +135,12 @@ impl AiContract {
             cmd("cercis merge <包目录> --into <项目>", "合并一个包：先校验指纹，再**并集**合并（两边的记录都留）；两边都改过的文件保留双方副本；本地文件永不被覆盖", "cercis merge /tmp/我的包 --into ./项目 --dry-run --json"),
             cmd("cercis guard <目录>", "分享守卫（红线：发布零数据）：逐文件判定能不能发出去，并列出隐私线索（邮箱/手机号/身份证/经纬度/自定义关键词）", "cercis guard . --keyword 未公开配方 --json"),
             cmd("cercis sync <项目>", "共存体检：项目在云盘/Git 目录里有没有分叉风险，有没有已经分叉的迹象（云盘冲突副本、残留临时文件、iCloud 占位符）", "cercis sync ./项目 --json"),
+            cmd("cercis remote add <项目> --name nas --path <挂载路径>", "登记 NAS/网络位置（填挂载后的本地路径）；口令用 remote credential set 存进系统钥匙串，**不要写进项目**", "cercis remote add ./项目 --name nas --path /Volumes/lab-nas --kind smb"),
+            cmd("cercis remote test <项目> --name nas", "网络目录体检（FR-N06）：可达、可写、能否原子改名、大小写、中文名、速度", "cercis remote test ./项目 --name nas --json"),
+            cmd("cercis remote claim <项目> --who <人@设备>", "取写租约：告诉别的设备「我在写」（写之前取，写完 release）", "cercis remote claim ./项目 --who wenhuan@laptop --minutes 30"),
+            cmd("cercis workcopy create <主副本> --to <本地目录>", "建工作副本（推荐通道）：本地离线记录，联网后双向合并", "cercis workcopy create /Volumes/lab-nas/试验 --to ~/试验-工作副本 --name nas"),
+            cmd("cercis workcopy status <本地副本>", "同步状态（FR-N07）：本地/主副本各有多少新变更、上次同步时间、待处理冲突", "cercis workcopy status ~/试验-工作副本 --json"),
+            cmd("cercis workcopy sync <本地副本>", "双向同步（拉回来 + 推上去，都是并集；断网会明确报离线）", "cercis workcopy sync ~/试验-工作副本 --dry-run --json"),
             cmd("cercis agents <项目>", "刷新 AI 材料与 Agent 技能包", "cercis agents ./项目"),
             cmd("cercis skill <项目>", "生成 Agent 技能包（--install codex|claude 可直接装）", "cercis skill ./项目 --install codex"),
         ];

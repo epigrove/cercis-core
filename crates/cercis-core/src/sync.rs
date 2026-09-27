@@ -13,7 +13,7 @@
 //! 注意：这是**体检**，不改任何东西，也不替你删"冲突副本"——里面可能就有你要的数据。
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 

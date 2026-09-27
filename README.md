@@ -24,13 +24,15 @@ Cercis 内核：**行业普适的"文件夹即数据库"引擎**。
   换密钥重加密、历史快照一并加密、解密导出留痕（`cercis share …`）
 - [x] **搬运与合并**（S12）：打包（全量/增量/分卷，加密区域保持密文）、并集合并
   （冲突留双方副本、本地永不覆盖、校验先过）、分享守卫（白名单 + 合成标记 + 隐私清单）
+- [x] **NAS 与工作副本**（FR-N01–N07）：网络位置登记与体检、写租约、凭据进钥匙串、
+  工作副本离线记录与双向同步（复用 pack/merge）、同步状态面板；云盘/Git 共存体检
 - [x] 命令行（`cercis`，含 `--json`）
 
 ## 构建与测试（作者自测）
 
 ```bash
 cd kernel
-cargo test          # 运行测试（153 个：110 单元 + 43 端到端/集成，其中 S11 加密 10 个、S12 打包合并 10 个）
+cargo test          # 运行测试（168 个：117 单元 + 51 端到端/集成，其中 S11 加密 10、S12 打包合并 10、NAS/工作副本 9）
 cargo build         # 构建内核与命令行
 cargo run -p cercis-cli -- --help
 ```
@@ -69,6 +71,18 @@ cercis pack <目录> --out /tmp/增量包 --since /tmp/我的包/pack.json  # �
 cercis merge /tmp/我的包 --into <另一台设备上的项目>               # 合并：并集；冲突留双方副本；本地永不被覆盖
 cercis guard . --json                                            # 分享前扫一遍：白名单/真实数据/隐私线索
 cercis guard . --pack /tmp/发布包                                 # 按白名单打出分享包（有拒绝项就直接不干）
+
+# NAS / 网络位置与工作副本（FR-N01–N07）：内核只认"挂载好的路径"
+cercis remote add <目录> --name nas --path /Volumes/lab-nas --kind smb   # 登记网络位置（不含口令）
+cercis remote test <目录> --name nas                                 # 体检：可写、能否原子改名、大小写…
+cercis remote credential set <目录> --name nas --password-env NAS_PW  # 凭据进系统钥匙串（不写进项目）
+cercis remote claim <目录> --who 我@笔记本 --minutes 30                # 写租约：让别的设备看得见
+cercis workcopy create /Volumes/lab-nas/试验 --to ~/试验-工作副本        # 建工作副本（离线也能记）
+cercis workcopy status ~/试验-工作副本                                # 两边各有多少新变更、上次同步、冲突
+cercis workcopy sync ~/试验-工作副本                                  # 双向同步（= pack + merge；断网明确报离线）
+
+# 共存体检（FR-I06）：云盘 / Git 目录里用会不会分叉
+cercis sync <目录>
 ```
 
 > 加密细节（算法、文件格式、密钥世代、历史快照迁移）见需求文档 §12.5.1 与 D47–D49；
