@@ -1668,6 +1668,82 @@ pub fn encrypt_zone_history(
     Ok(report)
 }
 
+/// 清理解密导出的明文副本（`exports/` 下）。
+///
+/// 解密导出是"给 R / AI 看"的一次性副本，用完该删——`exports/` 里的明文
+/// 一旦留在磁盘上，加密就白做了。本函数**只动 `exports/`**，绝不碰 `tables/`
+/// 与区域内的密文；删除前会给清单，`dry_run` 只列不删。
+pub fn clean_exports(
+    root: &Path,
+    zone: Option<&str>,
+    dry_run: bool,
+) -> Result<(usize, u64, Vec<String>)> {
+    crate::accounts::require(root, crate::accounts::Role::Editor)?;
+    let base = match zone {
+        Some(z) => root.join("exports").join(z),
+        None => root.join("exports"),
+    };
+    let mut files = Vec::new();
+    let mut bytes = 0u64;
+    let mut stack = vec![base.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                bytes += fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                files.push(
+                    p.strip_prefix(root)
+                        .map(|x| x.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| p.display().to_string()),
+                );
+            }
+        }
+    }
+    files.sort();
+    if !dry_run {
+        for rel in &files {
+            let p = root.join(rel);
+            if p.exists() {
+                fs::remove_file(&p)?;
+            }
+        }
+        // 目录空了就一并收掉（只收 exports/ 下面的空目录）
+        prune_empty_dirs(&root.join("exports"));
+        log(
+            root,
+            &current_member(root).unwrap_or_else(|| "local-user".into()),
+            "delete",
+            "export",
+            zone.unwrap_or("all"),
+            &format!(
+                "清理解密导出的明文副本：{} 个文件（{} 字节）{}",
+                files.len(),
+                bytes,
+                if zone.is_some() {
+                    format!("｜区域 {}", zone.unwrap_or(""))
+                } else {
+                    String::new()
+                }
+            ),
+        )?;
+    }
+    Ok((files.len(), bytes, files))
+}
+
+fn prune_empty_dirs(dir: &Path) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            prune_empty_dirs(&p);
+            let _ = fs::remove_dir(&p); // 只删空目录；非空会失败，忽略
+        }
+    }
+}
+
 /// 取某个区域的内容密钥（从已解锁的会话里取）。
 pub fn key_for_zone(
     root: &Path,

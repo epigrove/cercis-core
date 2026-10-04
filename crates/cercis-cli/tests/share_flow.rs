@@ -623,6 +623,63 @@ fn history_snapshots_are_encrypted_but_still_restorable() {
 }
 
 #[test]
+fn export_then_clean_removes_plaintext_copies() {
+    let f = Fixture::new("clean");
+    f.add_member("alice", "alice-pw");
+    f.zone_create(&["--member", "alice:admin"]);
+    f.unlock("alice", "alice-pw");
+    ok(
+        &[
+            "share",
+            "export",
+            f.root(),
+            "--zone",
+            "secret-records",
+        ],
+        &f.env_refs(),
+    );
+    let exported = f.project.join("exports/secret-records/tables/records.csv");
+    assert!(exported.exists(), "导出后应该有明文副本");
+    assert_eq!(
+        find_marker(&f.project.join("exports"), "机密X9").len(),
+        1,
+        "exports/ 里确实有明文"
+    );
+
+    // 试运行不动文件
+    let dry = ok_json(
+        &["share", "clean", f.root(), "--dry-run", "--json"],
+        &f.env_refs(),
+    );
+    assert_eq!(dry["ok"], true);
+    assert_eq!(dry["files"].as_array().unwrap().len(), 1);
+    assert!(exported.exists(), "试运行不该删东西");
+
+    // 真清：明文没了，项目里的密文还在、还能读
+    let rep = ok_json(&["share", "clean", f.root(), "--json"], &f.env_refs());
+    assert_eq!(rep["bytes"].as_u64().unwrap() > 0, true);
+    assert!(!exported.exists(), "明文副本应被删掉");
+    assert_eq!(find_marker(&f.project, "机密X9"), Vec::<String>::new());
+    assert!(f.project.join("tables/records.csv.enc").exists());
+    let out = ok(&["show", f.root(), "--table", "records"], &f.env_refs());
+    assert!(out.contains("机密X9"), "密文还在、还能读：{out}");
+
+    // 流水里留了一条清理记录
+    let log = ok_json(&["log", f.root(), "--limit", "10", "--json"], &f.env_refs());
+    assert!(
+        log["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["summary"]
+                .as_str()
+                .unwrap_or("")
+                .contains("清理解密导出")),
+        "清理应留痕：{log}"
+    );
+}
+
+#[test]
 fn manifest_reports_encrypted_tables() {
     let f = Fixture::new("manifest");
     f.add_member("alice", "alice-pw");

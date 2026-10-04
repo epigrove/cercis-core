@@ -131,6 +131,7 @@ impl AiContract {
             cmd("cercis share unlock <项目> --member <成员>", "解锁加密区域（**口令必须由用户本人输入**；AI 不得代填、索取或记录口令）", "cercis share unlock ./项目 --member alice --ttl 8"),
             cmd("cercis share export <项目> --zone <区域>", "解密导出到 exports/ 给 R / AI 用（留痕；用完记得清理明文副本）", "cercis share export ./项目 --zone patent-data --dry-run"),
             cmd("cercis share lock <项目>", "上锁：清掉本机会话", "cercis share lock ./项目"),
+            cmd("cercis share clean <项目> [--zone <区域>]", "清理解密导出的明文副本（只动 exports/，用完就该删；留一条流水）", "cercis share clean ./项目 --dry-run --json"),
             cmd("cercis pack <项目> --out <目录>", "打包带走（可增量、可分卷；加密区域保持密文；默认每卷 20 MB 适配微信）", "cercis pack ./项目 --out /tmp/我的包 --part-size-mb 20 --json"),
             cmd("cercis merge <包目录> --into <项目>", "合并一个包：先校验指纹，再**并集**合并（两边的记录都留）；两边都改过的文件保留双方副本；本地文件永不被覆盖", "cercis merge /tmp/我的包 --into ./项目 --dry-run --json"),
             cmd("cercis guard <目录>", "分享守卫（红线：发布零数据）：逐文件判定能不能发出去，并列出隐私线索（邮箱/手机号/身份证/经纬度/自定义关键词）", "cercis guard . --keyword 未公开配方 --json"),

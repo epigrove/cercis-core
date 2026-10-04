@@ -959,6 +959,16 @@ enum ShareAction {
         #[arg(long)]
         member: Option<String>,
     },
+    /// 清理解密导出的明文副本（只动 exports/；用完就该删）
+    Clean {
+        path: PathBuf,
+        /// 只清某个区域的导出（不给就清 exports/ 下面全部）
+        #[arg(long)]
+        zone: Option<String>,
+        /// 只看会删什么
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -4309,6 +4319,35 @@ fn share_cmd(a: &ShareArgs, json_out: bool) -> Result<(), CercisError> {
             Ok(())
         }
 
+        ShareAction::Clean {
+            path,
+            zone,
+            dry_run,
+        } => {
+            let root = path.clone();
+            require_project(&root)?;
+            let (n, bytes, files) = access::clean_exports(&root, zone.as_deref(), *dry_run)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "dry_run": dry_run,
+                    "files": files,
+                    "bytes": bytes,
+                }));
+            } else if n == 0 {
+                println!("exports/ 里没有明文副本（本来就很干净）。");
+            } else if *dry_run {
+                println!("试运行：会删掉 {n} 个解密导出的明文副本（{bytes} 字节）：");
+                for f in &files {
+                    println!("  - {f}");
+                }
+            } else {
+                println!("已清掉 {n} 个明文副本（{bytes} 字节）——加密区域又只剩密文了。");
+            }
+            Ok(())
+        }
+
         ShareAction::Export {
             path,
             zone,
@@ -4347,6 +4386,7 @@ fn share_cmd(a: &ShareArgs, json_out: bool) -> Result<(), CercisError> {
                     rep.member
                 );
                 println!("  注意：导出的明文副本在项目 exports/ 下，用完记得清理；这次导出已记入流水。");
+                println!("  清理：cercis share clean {} --zone {}", path.display(), zone);
             }
             Ok(())
         }
