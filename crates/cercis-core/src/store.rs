@@ -114,6 +114,10 @@ impl Store {
     ///
     /// 若表不存在且未提供列定义，返回可读错误（而不是创建一张无列名的表）。
     pub fn load_table(&self, name: &str, columns: &[&str]) -> Result<Table> {
+        // 插件上下文：清单里限了表就只允许读那几张（Cordis §6.3 的权限降级）
+        if let Some(ctx) = crate::plugin::PluginContext::from_env() {
+            ctx.ensure_table(name, &self.root)?;
+        }
         let rel = format!("tables/{name}.csv");
         let path = self.root.join(&rel);
 
@@ -149,6 +153,9 @@ impl Store {
     /// - `action`：create / update / restore ……
     /// - `summary`：一句话说明（写入流水）
     pub fn save_table(&self, table: &Table, action: &str, summary: &str) -> Result<String> {
+        if let Some(ctx) = crate::plugin::PluginContext::from_env() {
+            ctx.ensure_write(&self.root)?;
+        }
         crate::accounts::require(&self.root, crate::accounts::Role::Editor)?;
         let before = self.read_stored(table.path())?;
         let hash_before = before
@@ -349,6 +356,10 @@ impl Store {
         source_ref: &str,
         batch_id: &str,
     ) -> Result<String> {
+        // 插件上下文：清单里 permissions.write 不为真就一律写不动
+        if let Some(ctx) = crate::plugin::PluginContext::from_env() {
+            ctx.ensure_write(&self.root)?;
+        }
         // 多人项目（有账户）里，写数据至少要是"编辑者"；开放模式一律放行
         crate::accounts::require(&self.root, crate::accounts::Role::Editor)?;
         let table_name = table

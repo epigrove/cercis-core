@@ -384,6 +384,12 @@ struct TrustArgs {
     /// 撤销信任（默认是授予信任）
     #[arg(long)]
     revoke: bool,
+    /// **允许这个插件联网**（清单里声明了网络时，必须显式点这个头；不点就一直拒绝运行）
+    #[arg(long)]
+    allow_network: bool,
+    /// 取消"允许联网"
+    #[arg(long)]
+    deny_network: bool,
 }
 
 #[derive(Args, Debug)]
@@ -2105,6 +2111,15 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                             "active": activation.active && !state.is_disabled(&p.manifest.id),
                             "inactive_reasons": activation.reasons,
                             "permissions": p.manifest.permission_summary(),
+                            // 结构化权限（界面/脚本要判断"能不能联网、能碰哪几张表"时用这个）
+                            "permission_detail": {
+                                "read": p.manifest.permissions.read,
+                                "write": p.manifest.permissions.write,
+                                "network": p.manifest.permissions.network,
+                                "network_allowed": trust.is_network_allowed(&p.manifest.id),
+                                "tables": p.manifest.permissions.tables,
+                                "required_tables": p.manifest.requires.tables,
+                            },
                             "ui": p.manifest.ui.len(),
                         })
                     }).collect::<Vec<_>>(),
@@ -2179,6 +2194,7 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
             let p = Project::open(&a.path, None)?;
             if a.revoke {
                 tr.untrust(&a.id);
+                tr.set_network_allowed(&a.id, false);
                 tr.save(&a.path)?;
                 p.store.append_change(&ChangeEntry::new(
                     &p.store.identity.user_id,
@@ -2193,6 +2209,13 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                 println!("已撤销信任：{}", a.id);
             } else {
                 tr.trust(&a.id, &target.fingerprint);
+                // 联网要单独点头：声明里要联网却不批准，插件一运行就会被拒（权限降级）
+                if a.allow_network {
+                    tr.set_network_allowed(&a.id, true);
+                }
+                if a.deny_network {
+                    tr.set_network_allowed(&a.id, false);
+                }
                 tr.save(&a.path)?;
                 p.store.append_change(&ChangeEntry::new(
                     &p.store.identity.user_id,
@@ -2206,6 +2229,23 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                 ))?;
                 println!("已信任插件：{}", a.id);
                 println!("  权限：{}", target.manifest.permission_summary());
+                if !target.manifest.permissions.network.is_off() {
+                    println!(
+                        "  联网：{}{}",
+                        target.manifest.permissions.network.summary(),
+                        if tr.is_network_allowed(&a.id) {
+                            "（已批准）"
+                        } else {
+                            "（**尚未批准**：要联网请加 --allow-network）"
+                        }
+                    );
+                }
+                if !target.manifest.permissions.tables.is_empty() {
+                    println!(
+                        "  只能碰这些表：{}",
+                        target.manifest.permissions.tables.join("、")
+                    );
+                }
                 println!("  指纹：{}", target.fingerprint);
                 println!("（内容一旦变化，信任将自动失效）");
             }

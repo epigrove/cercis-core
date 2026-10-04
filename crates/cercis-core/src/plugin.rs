@@ -46,9 +46,112 @@ pub struct Permissions {
     /// 写入项目数据（必须经内核通道）
     #[serde(default)]
     pub write: bool,
-    /// 访问网络（NAS、下载等）
+    /// 访问网络：`false` / `true` / 域名清单（"只允许这些域名"）
     #[serde(default)]
-    pub network: bool,
+    pub network: NetworkPermission,
+    /// **只允许碰这些表**（空 = 不限；没写时若 `requires.tables` 有值就按它算）
+    #[serde(default)]
+    pub tables: Vec<String>,
+}
+
+/// 网络权限：关 / 随便 / 只允许这几个域名（声明式；域名清单会在信任时给用户看）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum NetworkPermission {
+    Off,
+    Any,
+    Domains(Vec<String>),
+}
+
+impl Default for NetworkPermission {
+    fn default() -> Self {
+        NetworkPermission::Off
+    }
+}
+
+impl NetworkPermission {
+    pub fn is_off(&self) -> bool {
+        matches!(self, NetworkPermission::Off)
+    }
+
+    /// 这个主机名允许访问吗（`Off` 一律不许；`Domains` 支持 `*.example.com` 后缀写法）。
+    pub fn allows_host(&self, host: &str) -> bool {
+        match self {
+            NetworkPermission::Off => false,
+            NetworkPermission::Any => true,
+            NetworkPermission::Domains(list) => {
+                let h = host.trim().to_ascii_lowercase();
+                list.iter().any(|d| {
+                    let d = d.trim().to_ascii_lowercase();
+                    if let Some(suffix) = d.strip_prefix("*.") {
+                        h == suffix || h.ends_with(&format!(".{suffix}"))
+                    } else {
+                        h == d
+                    }
+                })
+            }
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        match self {
+            NetworkPermission::Off => "不联网".to_string(),
+            NetworkPermission::Any => "联网（未限定域名）".to_string(),
+            NetworkPermission::Domains(list) => format!("只允许访问：{}", list.join("、")),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for NetworkPermission {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(deserializer)?;
+        match v {
+            serde_json::Value::Bool(false) | serde_json::Value::Null => Ok(NetworkPermission::Off),
+            serde_json::Value::Bool(true) => Ok(NetworkPermission::Any),
+            serde_json::Value::String(s) => {
+                if s.trim().is_empty() || s.eq_ignore_ascii_case("false") {
+                    Ok(NetworkPermission::Off)
+                } else if s.eq_ignore_ascii_case("true") {
+                    Ok(NetworkPermission::Any)
+                } else {
+                    Ok(NetworkPermission::Domains(vec![s]))
+                }
+            }
+            serde_json::Value::Array(a) => {
+                let mut list = Vec::new();
+                for item in a {
+                    match item {
+                        serde_json::Value::String(s) => list.push(s),
+                        other => {
+                            return Err(D::Error::custom(format!(
+                                "network 清单里只写域名字符串，收到：{other}"
+                            )))
+                        }
+                    }
+                }
+                Ok(NetworkPermission::Domains(list))
+            }
+            other => Err(D::Error::custom(format!(
+                "network 只能是 false / true / 域名清单，收到：{other}"
+            ))),
+        }
+    }
+}
+
+impl Serialize for NetworkPermission {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            NetworkPermission::Off => serializer.serialize_bool(false),
+            NetworkPermission::Any => serializer.serialize_bool(true),
+            NetworkPermission::Domains(list) => list.serialize(serializer),
+        }
+    }
 }
 
 /// 支持的形态（对应 §14.6 的形态分级）。
@@ -532,8 +635,15 @@ impl PluginManifest {
         if self.permissions.write {
             parts.push("写入数据");
         }
-        if self.permissions.network {
-            parts.push("访问网络");
+        if !self.permissions.network.is_off() {
+            parts.push(match &self.permissions.network {
+                NetworkPermission::Any => "访问网络",
+                NetworkPermission::Domains(_) => "访问指定域名",
+                NetworkPermission::Off => "不联网",
+            });
+        }
+        if !self.permissions.tables.is_empty() {
+            parts.push("限这几张表");
         }
         if parts.is_empty() {
             "无（仅界面）".to_string()
@@ -642,6 +752,9 @@ pub struct TrustRecord {
     /// 插件 ID → 被信任的指纹
     #[serde(default)]
     pub trusted: std::collections::BTreeMap<String, String>,
+    /// 被明确批准"可以联网"的插件（清单里声明了网络、且用户点过头的）
+    #[serde(default)]
+    pub network_allowed: std::collections::BTreeSet<String>,
 }
 
 impl TrustRecord {
@@ -674,6 +787,162 @@ impl TrustRecord {
     /// 撤销信任。
     pub fn untrust(&mut self, id: &str) {
         self.trusted.remove(id);
+    }
+
+    /// 这个插件被批准联网了吗（声明里要联网 + 用户点过头）。
+    pub fn is_network_allowed(&self, id: &str) -> bool {
+        self.network_allowed.contains(id)
+    }
+
+    /// 批准 / 取消"允许联网"。
+    pub fn set_network_allowed(&mut self, id: &str, allowed: bool) {
+        if allowed {
+            self.network_allowed.insert(id.to_string());
+        } else {
+            self.network_allowed.remove(id);
+        }
+    }
+}
+
+/// 插件运行上下文（**权限降级的执行点**，Cordis §6.3）。
+///
+/// 插件宿主（app）在拉起插件时注入环境变量，内核在读写通道上按它执法：
+///
+/// | 环境变量 | 含义 |
+/// |---|---|
+/// | `CERCIS_PLUGIN_ID` | 是哪个插件在调用内核 |
+/// | `CERCIS_PLUGIN_TABLES` | 只允许碰这些表（逗号分隔；空 = 清单里没声明就按 `requires.tables`，仍为空则不限） |
+/// | `CERCIS_PLUGIN_WRITE` | `1`/`0`：清单里 `permissions.write` 是否为真 |
+/// | `CERCIS_PLUGIN_NETWORK` | `off` / `any` / 域名清单（逗号分隔） |
+///
+/// **诚实边界**：这是"协作边界"而不是沙箱——同一台机器上有心的程序总能绕过环境变量。
+/// 它挡住的是**误伤**：插件没声明读哪张表就不会读到，没声明写就写不动；真要防恶意程序，
+/// 靠的是信任指纹（内容一变信任就失效）+ 不装来路不明的插件。
+#[derive(Debug, Clone)]
+pub struct PluginContext {
+    pub plugin_id: String,
+    /// 允许的表（空 = 不限）
+    pub tables: Vec<String>,
+    pub write: bool,
+    pub network: NetworkPermission,
+}
+
+impl PluginContext {
+    /// 从环境变量读；**没有 `CERCIS_PLUGIN_ID` 就不是插件在调用**（人、脚本、app 本身）。
+    pub fn from_env() -> Option<Self> {
+        let plugin_id = std::env::var("CERCIS_PLUGIN_ID").ok()?;
+        if plugin_id.trim().is_empty() {
+            return None;
+        }
+        let tables = std::env::var("CERCIS_PLUGIN_TABLES")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let write = std::env::var("CERCIS_PLUGIN_WRITE")
+            .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+        let network = match std::env::var("CERCIS_PLUGIN_NETWORK") {
+            Ok(v) if v.trim().eq_ignore_ascii_case("any") => NetworkPermission::Any,
+            Ok(v) if v.trim().is_empty() || v.trim().eq_ignore_ascii_case("off") => {
+                NetworkPermission::Off
+            }
+            Ok(v) => NetworkPermission::Domains(
+                v.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect(),
+            ),
+            Err(_) => NetworkPermission::Off,
+        };
+        Some(Self {
+            plugin_id,
+            tables,
+            write,
+            network,
+        })
+    }
+
+    pub fn table_allowed(&self, table: &str) -> bool {
+        // 系统表（流水、更正）是内核自己的账本：插件每次写入都要留痕，
+        // 把它挡掉等于让"写入必须留痕"这条硬规则做不到——所以永远放行。
+        matches!(table, "change_log" | "corrections")
+            || self.tables.is_empty()
+            || self.tables.iter().any(|t| t == table)
+    }
+
+    /// 读这张表行不行。
+    pub fn ensure_table(&self, table: &str, project_root: &Path) -> Result<()> {
+        if self.table_allowed(table) {
+            return Ok(());
+        }
+        deny(
+            project_root,
+            &self.plugin_id,
+            &format!("想读表 {table}，但清单里只允许它碰：{}", self.tables.join("、")),
+        );
+        Err(CercisError::Invalid(format!(
+            "插件 {} 没有读表 {table} 的权限（清单里限定了：{}）。\n\
+             - 要让它读，请在 plugin.yaml 的 permissions.tables 里加上；\n\
+             - 或者不用它（停用：cercis plugins <项目> disable --id {}）",
+            self.plugin_id,
+            self.tables.join("、"),
+            self.plugin_id
+        )))
+    }
+
+    /// 写行不行（清单里 `permissions.write: false` 的插件一律只读）。
+    pub fn ensure_write(&self, project_root: &Path) -> Result<()> {
+        if self.write {
+            return Ok(());
+        }
+        deny(
+            project_root,
+            &self.plugin_id,
+            "想写数据，但清单里 permissions.write 是 false",
+        );
+        Err(CercisError::Invalid(format!(
+            "插件 {} 是只读的（清单里 permissions.write: false），不能写入项目数据。\n\
+             - 这是插件的声明，不是内核临时拦你；要写就得改清单并重新信任",
+            self.plugin_id
+        )))
+    }
+
+    /// 访问某个主机行不行（域名叫什么由清单声明，信任时给用户看过）。
+    pub fn ensure_host(&self, host: &str, project_root: &Path) -> Result<()> {
+        if self.network.allows_host(host) {
+            return Ok(());
+        }
+        deny(
+            project_root,
+            &self.plugin_id,
+            &format!("想访问 {host}，但清单里网络权限是：{}", self.network.summary()),
+        );
+        Err(CercisError::Invalid(format!(
+            "插件 {} 没有访问 {host} 的权限（清单里写的是：{}）",
+            self.plugin_id,
+            self.network.summary()
+        )))
+    }
+}
+
+/// 把一次越权尝试写进 `_labnote/denied.log`（**故意不走内核写入通道**：
+/// 越权日志本身不能被同一个权限挡住，否则就没证据了）。
+fn deny(project_root: &Path, plugin_id: &str, what: &str) {
+    let dir = project_root.join("_labnote");
+    let _ = std::fs::create_dir_all(&dir);
+    let line = format!("{}  {}  {}\n", crate::ids::now_iso8601(), plugin_id, what);
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("denied.log"))
+    {
+        let _ = f.write_all(line.as_bytes());
     }
 }
 
@@ -715,6 +984,88 @@ pub fn conflicts(found: &[DiscoveredPlugin]) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    fn ctx(tables: &[&str], write: bool) -> PluginContext {
+        PluginContext {
+            plugin_id: "demo".into(),
+            tables: tables.iter().map(|s| s.to_string()).collect(),
+            write,
+            network: NetworkPermission::Domains(vec!["github.com".into(), "*.example.org".into()]),
+        }
+    }
+
+    #[test]
+    fn table_scope_is_enforced_and_logged() {
+        let dir = std::env::temp_dir().join("cercis-plugin-guard-table");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = ctx(&["observations"], true);
+        c.ensure_table("observations", &dir).unwrap();
+        let err = c.ensure_table("private_notes", &dir).unwrap_err();
+        assert!(err.to_string().contains("没有读表"), "{err}");
+        // 越权要留痕（故意不走内核写入通道，免得被同一个权限挡住）
+        let log = std::fs::read_to_string(dir.join("_labnote/denied.log")).unwrap();
+        assert!(log.contains("demo") && log.contains("private_notes"), "{log}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_only_plugin_cannot_write() {
+        let dir = std::env::temp_dir().join("cercis-plugin-guard-write");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = ctx(&[], false);
+        let err = c.ensure_write(&dir).unwrap_err();
+        assert!(err.to_string().contains("只读"), "{err}");
+        assert!(ctx(&[], true).ensure_write(&dir).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn network_domains_are_checked() {
+        let c = ctx(&[], true);
+        assert!(c.network.allows_host("github.com"));
+        assert!(c.network.allows_host("api.example.org"));
+        assert!(c.network.allows_host("example.org"));
+        assert!(!c.network.allows_host("evil.com"));
+        assert!(!NetworkPermission::Off.allows_host("github.com"));
+        assert!(NetworkPermission::Any.allows_host("anything.example"));
+
+        let dir = std::env::temp_dir().join("cercis-plugin-guard-net");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(c.ensure_host("github.com", &dir).is_ok());
+        let err = c.ensure_host("evil.com", &dir).unwrap_err();
+        assert!(err.to_string().contains("evil.com"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn network_permission_parses_bool_and_list() {
+        let m = crate::plugin::PluginManifest::from_yaml(
+            "id: demo\nnamespace: demo\nname: Demo\nlabel_cn: 演示\nversion: 0.1.0\n\
+             tier: third-party\nrequires_plugin_api: 1\nentrypoint: demo\n\
+             permissions:\n  read: true\n  write: false\n  network: [github.com, '*.example.org']\n\
+             ui: []\n",
+        )
+        .unwrap();
+        match &m.permissions.network {
+            NetworkPermission::Domains(list) => assert_eq!(list.len(), 2),
+            other => panic!("应解析成域名清单：{other:?}"),
+        }
+        let m2 = crate::plugin::PluginManifest::from_yaml(
+            "id: demo2\nnamespace: demo2\nname: Demo2\nlabel_cn: 演示2\nversion: 0.1.0\n\
+             tier: third-party\nrequires_plugin_api: 1\nentrypoint: demo2\n\
+             permissions:\n  read: true\n  write: false\n  network: false\nui: []\n",
+        )
+        .unwrap();
+        assert!(m2.permissions.network.is_off());
+    }
 }
 
 #[cfg(test)]
