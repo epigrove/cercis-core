@@ -211,6 +211,8 @@ fn platform_available() -> bool {
     }
 }
 
+/// 找可执行文件在不在 PATH 上（macOS/Linux 用；Windows 走"不可用"分支）。
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn which(program: &str) -> bool {
     std::env::var("PATH")
         .map(|path| {
