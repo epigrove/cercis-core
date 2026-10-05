@@ -93,6 +93,8 @@ enum Command {
     Guard(GuardArgs),
     /// 共存体检：云盘 / Git 目录里用会不会分叉，有没有已经分叉的迹象（FR-I06）
     Sync(SyncArgs),
+    /// 差异对比（FR-M05）：一条记录改了什么，或两份快照多了/少了哪些行
+    Diff(DiffArgs),
     /// NAS / 网络位置：登记、体检、写租约、凭据进钥匙串（FR-N01–N06）
     Remote(RemoteArgs),
     /// 工作副本：本地离线记录，联网后双向合并（FR-N03 / FR-N07）
@@ -710,6 +712,27 @@ enum WorkcopyAction {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Args, Debug)]
+struct DiffArgs {
+    /// 项目目录
+    path: PathBuf,
+    /// 记录级对比：表名（如 records）
+    #[arg(long)]
+    table: Option<String>,
+    /// 记录级对比：记录编号（如 R-1）
+    #[arg(long)]
+    id: Option<String>,
+    /// 快照级对比：老那份历史对象的指纹
+    #[arg(long)]
+    from: Option<String>,
+    /// 快照级对比：新那份历史对象的指纹
+    #[arg(long)]
+    to: Option<String>,
+    /// 快照级对比：只显示变化，未变的行不打印
+    #[arg(long)]
+    only_changes: bool,
 }
 
 #[derive(Args, Debug)]
@@ -2308,6 +2331,7 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
         Command::Merge(a) => merge_cmd(a, cli.json)?,
         Command::Guard(a) => guard_cmd(a, cli.json)?,
         Command::Sync(a) => sync_cmd(a, cli.json)?,
+        Command::Diff(a) => diff_cmd(a, cli.json)?,
         Command::Remote(a) => remote_cmd(a, cli.json)?,
         Command::Workcopy(a) => workcopy_cmd(a, cli.json)?,
         Command::Account(a) => account_cmd(a, cli.json)?,
@@ -3463,6 +3487,61 @@ fn workcopy_cmd(a: &WorkcopyArgs, json_out: bool) -> Result<(), CercisError> {
             }
             Ok(())
         }
+    }
+}
+
+/// 差异对比（FR-M05）：记录级（字段改了什么）或快照级（多了/少了哪些行）。
+fn diff_cmd(a: &DiffArgs, json_out: bool) -> Result<(), CercisError> {
+    use cercis_core::diff;
+
+    match (&a.table, &a.id, &a.from, &a.to) {
+        // 记录级
+        (Some(table), Some(id), _, _) => {
+            let d = diff::record_diff(&a.path, table, id)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "kind": "record",
+                    "summary": d.summary(),
+                    "diff": d,
+                }));
+            } else {
+                println!("{}", diff::render_record(&d));
+            }
+            Ok(())
+        }
+        // 快照级
+        (_, _, Some(from), Some(to)) => {
+            let d = diff::snapshot_diff(&a.path, from, to)?;
+            if json_out {
+                print_json(&serde_json::json!({
+                    "schema": "cercis.cli/1",
+                    "ok": true,
+                    "kind": "snapshot",
+                    "summary": d.summary(),
+                    "diff": d,
+                }));
+            } else if a.only_changes {
+                println!("{}", diff::render_snapshot(&d));
+            } else {
+                println!("{}", d.summary());
+                for l in &d.lines {
+                    println!("{} {}", l.op, l.text);
+                }
+                for n in &d.notes {
+                    println!("注：{n}");
+                }
+            }
+            Ok(())
+        }
+        _ => Err(CercisError::Invalid(
+            "要给出要比什么：\n\
+             - 一条记录：cercis diff <项目> --table records --id R-1\n\
+             - 两份快照：cercis diff <项目> --from <老指纹> --to <新指纹>\n\
+             （指纹从 `cercis log` 或 `cercis manifest-cmd` 里拿）"
+                .into(),
+        )),
     }
 }
 

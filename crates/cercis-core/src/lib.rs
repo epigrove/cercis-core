@@ -40,6 +40,7 @@ pub mod ai;
 pub mod config;
 pub mod crypto;
 pub mod desired;
+pub mod diff;
 pub mod error;
 pub mod format;
 pub mod guard;
@@ -76,6 +77,7 @@ pub use access::{
 pub use accounts::{Account, Accounts, Role};
 pub use config::ProjectConfig;
 pub use desired::{Desired, DesiredDiff, WantedPlugin};
+pub use diff::{RecordDiff, SnapshotDiff};
 pub use error::{CercisError, Result};
 pub use manifest::Manifest;
 pub use pack::{MergeReport, PackManifest, PackOptions, PackReport};
