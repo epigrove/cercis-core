@@ -685,13 +685,22 @@ pub fn workcopy_status(copy: &Path) -> Result<WorkCopyStatus> {
     }
     let local_changes = local_now.saturating_sub(wc.last_sync_copy_changes);
     let remote_changes = remote_now.saturating_sub(wc.last_sync_main_changes);
+    // 三种状态分清：离线 / 有东西要同步 / **同步完了但冲突副本等人处理**
     let verdict = if !reachable {
         "offline"
-    } else if local_changes > 0 || remote_changes > 0 || !conflicts.is_empty() {
+    } else if local_changes > 0 || remote_changes > 0 {
         "needs-sync"
+    } else if !conflicts.is_empty() {
+        "has-conflicts"
     } else {
         "ok"
     };
+    if verdict == "has-conflicts" {
+        notes.push(format!(
+            "两边已经同步完了，但有 {} 处冲突副本等人挑（挑完删掉副本，状态就回到 ok）",
+            conflicts.len()
+        ));
+    }
     Ok(WorkCopyStatus {
         copy: copy.display().to_string(),
         main: wc.main,
@@ -971,6 +980,33 @@ mod tests {
         add_row(&pc, "R-2");
         let t = crate::table::Table::load(copy.join("tables/records.csv")).unwrap();
         assert_eq!(t.rows.len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn status_distinguishes_pending_conflicts_from_pending_sync() {
+        let dir = tmp("conflict-status");
+        let main = dir.join("main");
+        let copy = dir.join("copy");
+        let p = crate::Project::create(&main, "试验", Identity::default()).unwrap();
+        add_row(&p, "R-1");
+        workcopy_create(&main, &copy, "nas").unwrap();
+        // 只造一个冲突副本（假装上次同步留下、人还没处理），两边流水都不再动
+        std::fs::create_dir_all(copy.join("methods")).unwrap();
+        std::fs::write(
+            copy.join("methods/方法.md.conflict-2026-01-01T000000Z-abc123"),
+            "对方那份",
+        )
+        .unwrap();
+
+        let st = workcopy_status(&copy).unwrap();
+        assert_eq!(
+            st.verdict, "has-conflicts",
+            "同步已完成、只剩冲突副本 → 不该再报「要同步」：{st:?}"
+        );
+        assert_eq!(st.local_changes, 0);
+        assert_eq!(st.remote_changes, 0);
+        assert!(st.notes.iter().any(|n| n.contains("同步完了")), "{:?}", st.notes);
         let _ = fs::remove_dir_all(&dir);
     }
 

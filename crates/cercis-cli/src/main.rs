@@ -3444,6 +3444,9 @@ fn workcopy_cmd(a: &WorkcopyArgs, json_out: bool) -> Result<(), CercisError> {
                 match st.verdict.as_str() {
                     "ok" => println!("  两边一致，不用同步。"),
                     "needs-sync" => println!("  要同步：cercis workcopy sync {}", copy.display()),
+                    "has-conflicts" => println!(
+                        "  已经同步完了；剩下的是**冲突副本**要人工挑一份（挑完删掉副本即可）"
+                    ),
                     _ => println!("  主副本不可达（离线）：本地照记，联网后再同步。"),
                 }
                 for c in &st.conflicts {
