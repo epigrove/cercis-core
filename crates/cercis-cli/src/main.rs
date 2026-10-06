@@ -1133,6 +1133,13 @@ struct RestoreArgs {
 }
 
 fn main() {
+    // 下游把管道关掉时（`cercis show … | head`、AI 只读前几行）安静退出，
+    // 而不是抛 "failed printing to stdout: Broken pipe" 的 panic——
+    // 这是命令行工具的常识（cat / grep 都这么做）。
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     if let Err(e) = run(&cli) {
         // 错误也要能机器读

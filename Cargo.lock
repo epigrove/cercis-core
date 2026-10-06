@@ -145,6 +145,7 @@ dependencies = [
  "cercis-core",
  "clap",
  "csv",
+ "libc",
  "serde_json",
 ]
 
