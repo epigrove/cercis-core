@@ -30,7 +30,20 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     }
 
     // 同目录改名在同一文件系统内是原子操作。
-    fs::rename(&tmp, path)?;
+    // 改名失败是**网络盘/云盘上最常见的坑**（不支持原子改名，例如某些 WebDAV 挂载）：
+    // 这里把"怎么办"直接写进错误里，别让用户对着 Input/output error 发呆。
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(crate::CercisError::Invalid(format!(
+            "写入失败：临时文件改名不到位（{} → {}）：{e}\n\
+             - 如果这是在网络盘 / 云盘 / WebDAV / NAS 上：先体检 `cercis remote test <那个位置>`；\n\
+             - 体检说「不支持原子改名」时，不要直接在上面编辑，改用工作副本：\n\
+               cercis workcopy create <主副本> --to <本地目录>（本地照记，联网后 workcopy sync）\n\
+             - 如果只是权限问题：确认那个目录可写（同目录需要有创建与改名权限）",
+            tmp.display(),
+            path.display()
+        )));
+    }
 
     // 尽力而为地同步目录项（部分平台不支持，忽略错误）。
     if let Some(parent) = path.parent() {
