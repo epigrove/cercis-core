@@ -64,6 +64,8 @@ pub mod terms;
 pub mod tx;
 pub mod validate;
 pub mod value;
+#[cfg(test)]
+pub mod testsupport;
 
 /// 内核版本（来自 Cargo.toml）。
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");

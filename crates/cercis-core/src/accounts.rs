@@ -632,7 +632,8 @@ mod tests {
     #[test]
     fn roles_gate_writes_and_admin_ops() {
         let dir = tmp("roles");
-        std::env::set_var("CERCIS_SHARE_HOME", dir.join("share-home"));
+        crate::testsupport::share_home();
+        crate::testsupport::keychain_off();
         let p = crate::Project::create(&dir, "试验", Identity::default()).unwrap();
         add(
             &dir,
@@ -681,14 +682,14 @@ mod tests {
         // 越权要留痕
         let log_text = fs::read_to_string(dir.join("tables/change_log.csv")).unwrap();
         assert!(log_text.contains("denied"), "越权应有流水：{log_text}");
-        std::env::remove_var("CERCIS_SHARE_HOME");
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn admin_only_plugin_edit_requires_accounts_and_admin() {
         let dir = tmp("plugin-admin");
-        std::env::set_var("CERCIS_SHARE_HOME", dir.join("share-home"));
+        crate::testsupport::share_home();
+        crate::testsupport::keychain_off();
         crate::Project::create(&dir, "试验", Identity::default()).unwrap();
         // 打开开关但没账户 → 明确拒绝
         let mut cfg = crate::config::ProjectConfig::from_yaml(
@@ -725,7 +726,6 @@ mod tests {
         assert!(require_plugin_edit(&dir).is_err());
         login(&dir, "alice", "a", KdfParams::light(), 8).unwrap();
         require_plugin_edit(&dir).unwrap();
-        std::env::remove_var("CERCIS_SHARE_HOME");
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -271,12 +271,12 @@ mod tests {
 
     #[test]
     fn off_switch_disables_everything() {
-        std::env::set_var("CERCIS_KEYCHAIN", "off");
+        crate::testsupport::keychain_off();
         assert!(!enabled());
         assert!(!available());
         assert!(store("a", "b").is_err());
         assert_eq!(load("a").unwrap(), None);
-        std::env::remove_var("CERCIS_KEYCHAIN");
+
     }
 
     #[test]

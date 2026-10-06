@@ -1113,8 +1113,8 @@ mod tests {
         let a = dir.join("a");
         let pa = crate::Project::create(&a, "试验", Identity::default()).unwrap();
         add_row(&pa, "R-1");
-        std::env::set_var("CERCIS_SHARE_HOME", dir.join("share-home"));
-        std::env::set_var("CERCIS_SHARE_KDF", "light");
+        crate::testsupport::share_home();
+        crate::testsupport::keychain_off();
         crate::access::create_member(
             &a,
             "alice",
@@ -1139,8 +1139,6 @@ mod tests {
         fs::create_dir_all(&out).unwrap();
         let err = pack(&a, &out, &PackOptions::default()).unwrap_err();
         assert!(err.to_string().contains("明文"), "{err}");
-        std::env::remove_var("CERCIS_SHARE_HOME");
-        std::env::remove_var("CERCIS_SHARE_KDF");
         let _ = fs::remove_dir_all(&dir);
     }
 
