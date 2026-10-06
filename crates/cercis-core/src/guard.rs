@@ -26,7 +26,7 @@ pub const SYNTHETIC_MARKER: &str = "SYNTHETIC.md";
 const ALLOW_EXT: &[&str] = &[
     "md", "txt", "rs", "py", "js", "mjs", "ts", "tsx", "jsx", "html", "css", "scss", "json",
     "yaml", "yml", "toml", "sh", "bat", "ps1", "sql", "lock", "cfg", "ini", "svg", "xml",
-    "gitignore", "editorconfig",
+    "gitignore", "editorconfig", "desktop", "plist", "service",
 ];
 /// 直接拒绝：真实数据的典型位置与形态。
 const REFUSE_PREFIXES: &[&str] = &[
