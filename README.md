@@ -6,7 +6,7 @@ Cercis 内核：**行业普适的"文件夹即数据库"引擎**。
 - 不认识任何学科概念；字段语义由工具包模板提供
 - 用 Rust 编写；目标：单二进制、全平台、离线可用
 
-## 当前状态（S1–S11 已完成）
+## 当前状态（内核部分全部完成）
 
 - [x] 项目创建与打开（`project.yaml` + 目录骨架 + AGENTS.md 生成）
 - [x] 表读写（CSV：UTF-8 无 BOM、LF、列名小写 ASCII 下划线）
@@ -34,12 +34,12 @@ Cercis 内核：**行业普适的"文件夹即数据库"引擎**。
 
 ```bash
 cd kernel
-cargo test          # 运行测试（178 个：122 单元 + 56 端到端/集成，含 S11 加密、S12 打包合并、NAS/工作副本、账户与权限）
+cargo test          # 运行测试（193 个：单元 + 端到端/集成，含加密共享、打包合并、NAS/工作副本、账户与权限、差异对比）
 cargo build         # 构建内核与命令行
 cargo run -p cercis-cli -- --help
 ```
 
-> 状态（2026-09-20）：构建通过，测试全绿（0 warning）。
+> 状态（2026-10-10）：构建通过，测试全绿（0 warning）；Linux / Windows 目标交叉检查同样零警告。
 
 ## 常用命令速查
 
@@ -56,6 +56,10 @@ cercis log <目录> --limit 20                  # 谁/哪台设备/何时改了�
 cercis note <目录> --action export --summary "导出 3 行到 /tmp/x.csv"   # 插件记录导出等动作
 cercis agents <目录>                          # 刷新 AGENTS.md / 契约 / 清单 / Agent 技能包
 cercis skill <目录> --install codex           # 把 Agent 技能包装到 ~/.codex/skills/
+cercis skill --generic --install codex        # 还没建项目时的通用技能包
+cercis diff <目录> --table records --id R-1   # 单条记录差异（旧值 → 生效值，附更正理由）
+cercis value-types / infer-types / set-field-type <目录>   # 值类型：清单 / 推断 / 指定
+cercis market list                            # 插件市场（预置基础包与科研包；装 / 删 / 找回）
 cercis plugins <目录> / cercis trust <目录> --id <插件ID>
 
 # 加密共享与分权（S11）：区域内的文件在磁盘上是密文，解锁后透明读写
