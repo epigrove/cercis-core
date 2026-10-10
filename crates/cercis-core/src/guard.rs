@@ -359,6 +359,12 @@ fn scan_text(rel: &str, text: &str, keywords: &[String]) -> Vec<PrivacyHit> {
         ("geo", &geo),
     ] {
         for m in re.find_iter(text).take(5) {
+            // 文件名长得像邮箱不是隐私：`icon_512x512@2x.png`、`logo@3x.png` 这类
+            // 在打包脚本里很常见（Apple 规定的 iconset 命名就是这样）。
+            // 判据：整段以图片/文档扩展名结尾 → 当成文件名，不报。
+            if kind == "email" && looks_like_a_filename(m.as_str()) {
+                continue;
+            }
             hits.push(PrivacyHit {
                 path: rel.to_string(),
                 kind: kind.to_string(),
@@ -381,6 +387,16 @@ fn scan_text(rel: &str, text: &str, keywords: &[String]) -> Vec<PrivacyHit> {
         }
     }
     hits
+}
+
+/// `xxx@2x.png` 这种"像邮箱的扩展名/文件名"。
+fn looks_like_a_filename(s: &str) -> bool {
+    const EXTS: [&str; 12] = [
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".icns", ".pdf", ".heic", ".tif",
+        ".tiff", ".webp",
+    ];
+    let lower = s.to_ascii_lowercase();
+    EXTS.iter().any(|e| lower.ends_with(e))
 }
 
 /// 按白名单把目录打成分享包（拒绝项存在时直接不干）。
@@ -469,6 +485,32 @@ mod tests {
         assert!(rep2.is_shareable());
         assert!(out.join("share-manifest.json").exists());
         assert!(out.join("src/lib.rs").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 打包脚本里的 `icon_512x512@2x.png` 不是隐私——文件名别当邮箱报。
+    #[test]
+    fn file_names_that_look_like_emails_are_not_privacy_hits() {
+        let dir = std::env::temp_dir().join("cercis-guard-test-filenames");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("build.sh"),
+            "cp icon-512.png out/icon_256x256@2x.png\ncp logo.png out/logo@3x.png\n",
+        )
+        .unwrap();
+        let rep = scan(&dir, &GuardOptions::default()).unwrap();
+        assert!(
+            rep.privacy.is_empty(),
+            "文件名不该被当成邮箱：{:?}",
+            rep.privacy
+        );
+
+        // 真正的邮箱仍然要报出来
+        fs::write(dir.join("contact.md"), "写邮件到 alice@lab.example.cn 联系\n").unwrap();
+        let rep = scan(&dir, &GuardOptions::default()).unwrap();
+        assert_eq!(rep.privacy.len(), 1);
+        assert_eq!(rep.privacy[0].kind, "email");
         let _ = fs::remove_dir_all(&dir);
     }
 
