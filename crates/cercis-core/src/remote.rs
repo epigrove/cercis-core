@@ -421,7 +421,7 @@ fn guess_kind(path: &str) -> &'static str {
 pub fn claim(root: &Path, who: &str, minutes: i64) -> Result<String> {
     if who.trim().is_empty() {
         return Err(CercisError::Invalid(
-            "要写清「谁在哪台设备上写」，如 --who wenhuan@laptop".into(),
+            "要写清「谁在哪台设备上写」，如 --who alice@laptop".into(),
         ));
     }
     let dir = root.join("access/leases");
@@ -1015,10 +1015,10 @@ mod tests {
         let dir = tmp("lease");
         let main = dir.join("main");
         crate::Project::create(&main, "试验", Identity::default()).unwrap();
-        claim(&main, "wenhuan@laptop", 30).unwrap();
+        claim(&main, "alice@laptop", 30).unwrap();
         let active = active_leases(&main).unwrap();
         assert_eq!(active.len(), 1);
-        assert!(active[0].contains("wenhuan@laptop"));
+        assert!(active[0].contains("alice@laptop"));
         // 过期的租约不算数
         fs::write(
             main.join("access/leases/old.lease"),
@@ -1026,7 +1026,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(active_leases(&main).unwrap().len(), 1);
-        assert!(release(&main, "wenhuan@laptop").unwrap() >= 1);
+        assert!(release(&main, "alice@laptop").unwrap() >= 1);
         assert!(active_leases(&main).unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);
     }

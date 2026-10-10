@@ -330,7 +330,7 @@ fn write_lease_is_visible_and_releasable() {
             "claim",
             main.to_str().unwrap(),
             "--who",
-            "wenhuan@laptop",
+            "alice@laptop",
             "--minutes",
             "30",
             "--json",
@@ -338,7 +338,7 @@ fn write_lease_is_visible_and_releasable() {
         &[],
     );
     assert_eq!(claimed["ok"], true);
-    assert!(main.join("access/leases/wenhuan_laptop.lease").exists());
+    assert!(main.join("access/leases/alice_laptop.lease").exists());
 
     let released = ok_json(
         &[
@@ -346,11 +346,11 @@ fn write_lease_is_visible_and_releasable() {
             "release",
             main.to_str().unwrap(),
             "--who",
-            "wenhuan@laptop",
+            "alice@laptop",
             "--json",
         ],
         &[],
     );
     assert!(released["cleared"].as_u64().unwrap() >= 1);
-    assert!(!main.join("access/leases/wenhuan_laptop.lease").exists());
+    assert!(!main.join("access/leases/alice_laptop.lease").exists());
 }

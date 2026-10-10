@@ -1,111 +1,138 @@
-# cercis-core（内核）
+# cercis-core (kernel)
 
-Cercis 内核：**行业普适的"文件夹即数据库"引擎**。
+**English** | [中文](README.zh-CN.md)
 
-- 只做两件事：**数据存取**（表/记录/文件/历史/查询原语）与 **AI 友好**（数据契约/机器清单/JSON/权限）
-- 不认识任何学科概念；字段语义由工具包模板提供
-- 用 Rust 编写；目标：单二进制、全平台、离线可用
+The Cercis kernel: a **domain-neutral "folder-is-a-database" engine**.
 
-## 当前状态（内核部分全部完成）
+- It does exactly two things: **data storage** (tables, records, files, history, query
+  primitives) and **AI-friendliness** (data contract, machine manifest, JSON, permissions).
+- It knows no discipline-specific concepts; field semantics come from kit templates.
+- Written in Rust; the goal is a single binary, every platform, fully offline.
 
-- [x] 项目创建与打开（`project.yaml` + 目录骨架 + AGENTS.md 生成）
-- [x] 表读写（CSV：UTF-8 无 BOM、LF、列名小写 ASCII 下划线）
-- [x] 原子写入（临时文件 + 改名；断电不产生半写文件）；单行追加与**批量追加**（一次事务、一条流水）
-- [x] 逐次存档（内容寻址对象库）+ 检查点（文件级备份，默认保留 50 个）
-- [x] 变更流水（谁/设备/时间/动作/对象/前后指纹）
-- [x] 更正机制（不覆盖原值）
-- [x] 模板机制（表结构与字段语义来自模板，内核不含学科词）
-- [x] 查询原语（组合筛选 + 排序 + 分页，结果可复现）
-- [x] 引用完整性与字段校验
-- [x] 机器清单 + AI 契约（`AGENTS.md` / `CLAUDE.md` / `manifest.json` / `ai_contract.json`）
-- [x] **Agent 技能包**（`_labnote/skill/cercis/`）：装到 Codex / Claude Code 用的操作手册，与契约同源生成
-- [x] 插件协议（清单、权限、界面扩展点、信任绑定内容指纹）
-- [x] **加密共享与分权**（S11）：加密区域（磁盘即密文）、账号口令解锁、成员密钥封装、
-  换密钥重加密、历史快照一并加密、解密导出留痕（`cercis share …`）
-- [x] **搬运与合并**（S12）：打包（全量/增量/分卷，加密区域保持密文）、并集合并
-  （冲突留双方副本、本地永不覆盖、校验先过）、分享守卫（白名单 + 合成标记 + 隐私清单）
-- [x] **NAS 与工作副本**（FR-N01–N07）：网络位置登记与体检、写租约、凭据进钥匙串、
-  工作副本离线记录与双向同步（复用 pack/merge）、同步状态面板；云盘/Git 共存体检
-- [x] **多人账户与权限分级**（FR-N08/N09/N11）：账户只存加盐哈希、开放模式、查看者/编辑者/管理员
-  三档角色在内核层设闸、越权写 `denied` 流水、`plugins.admin_only_edit` 真正生效
-- [x] 命令行（`cercis`，含 `--json`）
+## Status (the kernel is complete)
 
-## 构建与测试（作者自测）
+- [x] Project creation and opening (`project.yaml` + directory skeleton + AGENTS.md)
+- [x] Table read/write (CSV: UTF-8 without BOM, LF, lowercase ASCII underscore column names)
+- [x] Atomic writes (temp file + rename; a power cut never leaves a half-written file); single-row
+  append and **batch append** (one transaction, one log entry)
+- [x] Per-change snapshots (content-addressed object store) + checkpoints (file-level backups,
+  keep the latest 50 by default)
+- [x] Change log (who / device / time / action / object / before-and-after fingerprints)
+- [x] Corrections (the original value is never overwritten)
+- [x] Templates (table structure and field semantics come from the template; no discipline words
+  in the kernel)
+- [x] Query primitives (combined filters + sorting + paging, reproducible results)
+- [x] Referential integrity and field validation
+- [x] Value types and validation (seven value domains + constraints; inference only advises,
+  it never edits a template by itself)
+- [x] Machine manifest + AI contract (`AGENTS.md` / `CLAUDE.md` / `manifest.json` /
+  `ai_contract.json`)
+- [x] **Agent skill** (`_labnote/skill/cercis/`): an operating manual for Codex / Claude Code,
+  generated from the same contract; `--generic` works before any project exists
+- [x] Plugin protocol (manifest, permissions, UI extension points, trust bound to a content
+  fingerprint); marketplace (presets / your own, install / remove / restore)
+- [x] **Dynamic composability**: plugin registry with reverse-order rollback, declarative
+  prerequisites, project state fingerprint, key namespaces and conflict checks
+- [x] **Permission downgrades**: the table scope / read-only / domain allow-list declared in a
+  plugin manifest are actually enforced; denied writes go to the `denied` log
+- [x] **Encrypted sharing with per-member access** (S11): zones are ciphertext on disk, members
+  unlock with a passphrase, keys are wrapped per member, revoking a member re-encrypts, snapshots
+  are encrypted too, exports are logged (`cercis share …`)
+- [x] **Pack, merge and share guard** (S12): packing (full / incremental / split volumes, zones
+  stay encrypted), union merge (conflicting files keep both copies, the local side is never
+  overwritten, validation runs first), share guard (allow-list + synthetic markers + privacy scan)
+- [x] **NAS and working copies** (FR-N01–N07): register a network location and run its health
+  check, write leases, credentials in the system keychain, offline recording in a working copy and
+  two-way sync (reusing pack/merge), sync status panel, cloud-drive/Git coexistence check
+- [x] **Accounts and roles** (FR-N08/N09/N11): accounts store only salted hashes, open mode
+  without the file, three roles (viewer / editor / admin) enforced **in the kernel**, denied writes
+  logged, `plugins.admin_only_edit` actually enforced
+- [x] **Diff** (FR-M05): record level (old value → effective value, with the correction reason) and
+  snapshot level (line-by-line LCS)
+- [x] Command line (`cercis`, with `--json`)
+
+## Build and test
 
 ```bash
 cd kernel
-cargo test          # 运行测试（193 个：单元 + 端到端/集成，含加密共享、打包合并、NAS/工作副本、账户与权限、差异对比）
-cargo build         # 构建内核与命令行
+cargo test          # 193 tests: unit + end-to-end/integration (encryption, pack/merge, NAS,
+                    # working copies, accounts and roles, diff)
+cargo build         # builds the library and the command line
 cargo run -p cercis-cli -- --help
 ```
 
-> 状态（2026-10-10）：构建通过，测试全绿（0 warning）；Linux / Windows 目标交叉检查同样零警告。
+> Status (2026-10-10): builds clean, all tests green, zero warnings; the Linux and Windows targets
+> also pass `cargo check` with zero warnings.
 
-## 常用命令速查
+## Command cheat sheet
 
 ```bash
-cercis init <目录> --name <项目名>            # 建项目
-cercis install-template <目录> --name example-study
-cercis append <目录> --table records --set record_id=R-1 --set date=2026-03-15
-cercis append-many <目录> --table records --from 数据.csv --source-ref imports/数据.csv
-cercis append-many <目录> --table records --from 数据.csv --dry-run   # 只校验不写入
-cercis query <目录> --table records --filter value_num gt 10 --sort date:desc
-cercis validate <目录>                        # 引用完整性 + 字段规则
-cercis correct <目录> --table records --target R-1 --field value_num --old 1 --new 2 --reason 誊写笔误
-cercis log <目录> --limit 20                  # 谁/哪台设备/何时改了什么
-cercis note <目录> --action export --summary "导出 3 行到 /tmp/x.csv"   # 插件记录导出等动作
-cercis agents <目录>                          # 刷新 AGENTS.md / 契约 / 清单 / Agent 技能包
-cercis skill <目录> --install codex           # 把 Agent 技能包装到 ~/.codex/skills/
-cercis skill --generic --install codex        # 还没建项目时的通用技能包
-cercis diff <目录> --table records --id R-1   # 单条记录差异（旧值 → 生效值，附更正理由）
-cercis value-types / infer-types / set-field-type <目录>   # 值类型：清单 / 推断 / 指定
-cercis market list                            # 插件市场（预置基础包与科研包；装 / 删 / 找回）
-cercis plugins <目录> / cercis trust <目录> --id <插件ID>
+cercis init <dir> --name <project name>       # create a project
+cercis install-template <dir> --name example-study
+cercis append <dir> --table records --set record_id=R-1 --set date=2026-03-15
+cercis append-many <dir> --table records --from data.csv --source-ref imports/data.csv
+cercis append-many <dir> --table records --from data.csv --dry-run   # validate only
+cercis query <dir> --table records --filter value_num gt 10 --sort date:desc
+cercis validate <dir>                         # referential integrity + field rules
+cercis correct <dir> --table records --target R-1 --field value_num --old 1 --new 2 --reason typo
+cercis log <dir> --limit 20                   # who changed what, on which device, when
+cercis note <dir> --action export --summary "exported 3 rows to /tmp/x.csv"
+cercis agents <dir>                           # refresh AGENTS.md / contract / manifest / skill
+cercis skill <dir> --install codex            # install the agent skill into ~/.codex/skills/
+cercis skill --generic --install codex        # generic skill, before you have a project
+cercis diff <dir> --table records --id R-1    # per-record diff (old value → effective value)
+cercis value-types / infer-types / set-field-type <dir>   # value types: list / infer / set
+cercis market list                            # plugin marketplace (install / remove / restore)
+cercis plugins <dir> / cercis trust <dir> --id <plugin id>
 
-# 加密共享与分权（S11）：区域内的文件在磁盘上是密文，解锁后透明读写
-cercis share member-add <目录> --id alice --name 张老师        # 建成员（私钥用他的口令加密）
-cercis share zone-create <目录> --name secret --path 'methods/配方/**' --member alice:admin
-cercis share unlock <目录> --member alice                      # 解锁（会话在用户主目录，0600，不进项目）
-cercis share status <目录>                                     # 区域、密钥指纹、明文残留、解不开的密文
-cercis share export <目录> --zone secret                       # 解密导出到 exports/ 给 R / AI 用（留痕）
-cercis share revoke <目录> --zone secret --member bob --as alice  # 移除成员：换密钥 + 重新加密
-cercis share lock <目录>                                       # 上锁（--forget 连钥匙串口令一起删）
+# Encrypted sharing (S11): files in a zone are ciphertext on disk, transparent once unlocked
+cercis share member-add <dir> --id alice --name Alice
+cercis share zone-create <dir> --name secret --path 'methods/recipes/**' --member alice:admin
+cercis share unlock <dir> --member alice      # session lives in your home dir, mode 0600, never in the project
+cercis share status <dir>                     # zones, key fingerprints, leftover plaintext, unreadable blobs
+cercis share export <dir> --zone secret       # decrypt into exports/ for R / AI (logged)
+cercis share revoke <dir> --zone secret --member bob --as alice   # remove a member: rekey + re-encrypt
+cercis share lock <dir>                       # lock (--forget also drops the keychain passphrase)
 
-# 搬运与合并（S12）：打包带走、回来并集合并；分享守卫守住"发布零数据"
-cercis pack <目录> --out /tmp/我的包 --part-size-mb 20            # 打包（每卷 20 MB，适配微信）
-cercis pack <目录> --out /tmp/增量包 --since /tmp/我的包/pack.json  # 增量：只装变化的文件
-cercis merge /tmp/我的包 --into <另一台设备上的项目>               # 合并：并集；冲突留双方副本；本地永不被覆盖
-cercis guard . --json                                            # 分享前扫一遍：白名单/真实数据/隐私线索
-cercis guard . --pack /tmp/发布包                                 # 按白名单打出分享包（有拒绝项就直接不干）
+# Pack and merge (S12): carry the project away, merge back as a union; the guard keeps releases clean
+cercis pack <dir> --out /tmp/my-pack --part-size-mb 20            # split volumes, e.g. for chat apps
+cercis pack <dir> --out /tmp/inc --since /tmp/my-pack/pack.json   # incremental: only changed files
+cercis merge /tmp/my-pack --into <project on the other device>    # union merge; conflicts keep both copies
+cercis guard . --json                                            # scan before sharing: allow-list / real data / privacy
+cercis guard . --pack /tmp/release-pack                           # build a share package; refuses on any rejection
 
-# NAS / 网络位置与工作副本（FR-N01–N07）：内核只认"挂载好的路径"
-cercis remote add <目录> --name nas --path /Volumes/lab-nas --kind smb   # 登记网络位置（不含口令）
-cercis remote test <目录> --name nas                                 # 体检：可写、能否原子改名、大小写…
-cercis remote credential set <目录> --name nas --password-env NAS_PW  # 凭据进系统钥匙串（不写进项目）
-cercis remote claim <目录> --who 我@笔记本 --minutes 30                # 写租约：让别的设备看得见
-cercis workcopy create /Volumes/lab-nas/试验 --to ~/试验-工作副本        # 建工作副本（离线也能记）
-cercis workcopy status ~/试验-工作副本                                # 两边各有多少新变更、上次同步、冲突
-cercis workcopy sync ~/试验-工作副本                                  # 双向同步（= pack + merge；断网明确报离线）
+# NAS / network locations and working copies (FR-N01–N07): the kernel only knows mounted paths
+cercis remote add <dir> --name nas --path /Volumes/lab-nas --kind smb   # register (no password)
+cercis remote test <dir> --name nas                                 # health check: writable, atomic rename, case…
+cercis remote credential set <dir> --name nas --password-env NAS_PW  # credentials to the keychain (never in the project)
+cercis remote claim <dir> --who me@laptop --minutes 30                # write lease so other devices can see it
+cercis workcopy create /Volumes/lab-nas/trial --to ~/trial-workcopy   # working copy (records offline)
+cercis workcopy status ~/trial-workcopy                               # new changes on each side, last sync, conflicts
+cercis workcopy sync ~/trial-workcopy                                 # two-way sync (= pack + merge); offline is reported
 
-# 共存体检（FR-I06）：云盘 / Git 目录里用会不会分叉
-cercis sync <目录>
+# Coexistence check (FR-I06): using a cloud drive or Git directory without forking
+cercis sync <dir>
 
-# 多人账户与权限分级（FR-N08/N09/N11）：只存加盐哈希；没有账户文件就是开放模式
-cercis account add <目录> --id alice --name 张老师 --role admin --password-env PW
-cercis account login <目录> --id alice --password-env PW      # 登录态在本机用户目录，不进项目
-cercis account whoami <目录> / cercis account logout <目录>
-cercis account role <目录> --id bob --role editor             # 要管理员；不能删/降最后一个管理员
-# 角色闸门在内核层：查看者只读；编辑者能写数据；管理员才能改结构/插件/加密区域/账户；越权写 denied 流水
+# Accounts and roles (FR-N08/N09/N11): salted hashes only; no account file means open mode
+cercis account add <dir> --id alice --name Alice --role admin --password-env PW
+cercis account login <dir> --id alice --password-env PW      # session in your home dir, not in the project
+cercis account whoami <dir> / cercis account logout <dir>
+cercis account role <dir> --id bob --role editor             # admin only; the last admin cannot be demoted
+# Role gates live in the kernel: viewers read, editors write data, admins change structure,
+# plugins, zones and accounts; denied writes are logged.
 ```
 
-> 加密细节（算法、文件格式、密钥世代、历史快照迁移）见需求文档 §12.5.1 与 D47–D49；
-> 一句话：**拿到文件夹 ≠ 拿得到数据**，忘记口令无法找回。
+> Encryption details (algorithms, file format, key generations, snapshot migration) are in the
+> internal requirement document §12.5.1 / D47–D49; in one sentence: **having the folder does not
+> mean having the data**, and a forgotten passphrase cannot be recovered.
 
-> 批量追加是**导入的写入原语**：整批要么全写入、要么全不写，且只产生一条流水
-> （带 `batch_id` 与 `source_ref`）。导入的映射、预览、报告由基础工具包负责。
+> Batch append is the **write primitive for imports**: the whole batch is written or nothing is,
+> and it produces a single log entry (with `batch_id` and `source_ref`). Mapping, preview and
+> reports belong to the basic kit.
 
-## 红线
+## Hard rules
 
-1. 数据只增不改（更正写 `corrections.csv`；原值由 `history/objects/` 永久保留）
-2. 写入必须原子
-3. 不用本工具，仅靠 CSV/媒体文件也能理解并使用数据
+1. Data is append-only (corrections go to `corrections.csv`; originals stay forever in
+   `history/objects/`)
+2. Every write is atomic
+3. Without this tool, the CSV and media files are still fully understandable and usable

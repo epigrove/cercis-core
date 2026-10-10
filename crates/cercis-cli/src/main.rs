@@ -637,7 +637,7 @@ enum RemoteAction {
     /// 取写租约：告诉别的设备"我在写"
     Claim {
         path: PathBuf,
-        /// 谁在哪台设备上写，如 wenhuan@laptop
+        /// 谁在哪台设备上写，如 alice@laptop
         #[arg(long)]
         who: String,
         #[arg(long, default_value_t = 30)]
