@@ -102,6 +102,28 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// 一个"没有具体项目"的清单：给**随包交付的通用 Agent 技能包**用。
+    ///
+    /// 技能包按契约生成（§11.5），而契约需要模板 + 清单；用户装完 app 但还没有项目时，
+    /// 就用这份通用清单（空表、通用模板）生成一份"任何项目都能用"的技能包。
+    pub fn generic() -> Self {
+        Self {
+            schema: "cercis.manifest/1".into(),
+            project_name: "Cercis（通用）".into(),
+            project_id: String::new(),
+            schema_version: 1,
+            core_version: crate::CORE_VERSION.to_string(),
+            generated_at: String::new(),
+            template: "generic".into(),
+            terms_profile: "generic".into(),
+            state_hash: String::new(),
+            tables: Vec::new(),
+            access: AccessSummary::default(),
+            change_count: 0,
+            last_change_at: String::new(),
+        }
+    }
+
     /// 生成清单（扫描 tables/*.csv）。
     pub fn generate(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref();
@@ -337,5 +359,20 @@ mod tests {
         let back = Manifest::load(p.root()).unwrap();
         assert_eq!(back.project_name, "示例");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 通用清单：给"还没建项目，但想先把 AI 技能包装上"的用户用。
+    #[test]
+    fn generic_manifest_has_no_project_specifics() {
+        let m = Manifest::generic();
+        assert_eq!(m.schema, "cercis.manifest/1");
+        assert_eq!(m.template, "generic");
+        assert!(m.tables.is_empty(), "通用清单里不该有具体表");
+        assert!(m.project_id.is_empty());
+        assert_eq!(m.core_version, crate::CORE_VERSION);
+        // 能被序列化/反序列化（技能包生成时会走 JSON）
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.template, "generic");
     }
 }

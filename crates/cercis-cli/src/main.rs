@@ -367,14 +367,17 @@ struct EnableArgs {
 
 #[derive(Args, Debug)]
 struct SkillArgs {
-    /// 项目目录（技能包按它的模板与契约生成）
-    path: PathBuf,
+    /// 项目目录（技能包按它的模板与契约生成；用 --generic 时可以不给）
+    path: Option<PathBuf>,
     /// 写到指定目录（默认写进项目 `_labnote/skill/`）
     #[arg(long)]
     out: Option<PathBuf>,
     /// 直接装到 AI 宿主的技能目录：codex（~/.codex/skills）或 claude（~/.claude/skills）
     #[arg(long)]
     install: Option<String>,
+    /// 生成**通用**技能包（不依赖任何项目；装完 app 还没建库时用这个）
+    #[arg(long)]
+    generic: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1516,17 +1519,44 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                     "--out 与 --install 只能用一个（前者写到你指定的目录，后者装进 AI 宿主）".into(),
                 ));
             }
-            let p = Project::open(&a.path, None)?;
-            let manifest = cercis_core::Manifest::generate(&a.path)?;
-            let contract = cercis_core::AiContract::build(&p.template()?, &manifest);
+            // 通用技能包（--generic）：不依赖任何项目——装完 app 还没建库时也能先把技能装上
+            let contract = match (&a.path, a.generic) {
+                (Some(path), false) => {
+                    let p = Project::open(path, None)?;
+                    let manifest = cercis_core::Manifest::generate(path)?;
+                    cercis_core::AiContract::build(&p.template()?, &manifest)
+                }
+                (None, true) => cercis_core::AiContract::build(
+                    &cercis_core::Template::generic(),
+                    &cercis_core::Manifest::generic(),
+                ),
+                (None, false) => {
+                    return Err(CercisError::Invalid(
+                        "要给项目生成技能包就写项目目录（cercis skill <项目>）；\
+                         想生成不依赖项目的通用技能包就加 --generic"
+                            .into(),
+                    ))
+                }
+                (Some(_), true) => {
+                    return Err(CercisError::Invalid(
+                        "--generic 与项目目录只能给一个（通用技能包不读任何项目）".into(),
+                    ))
+                }
+            };
             let skill = cercis_core::AgentSkill::build(&contract);
 
             let (target, host) = if let Some(host) = a.install.as_deref() {
                 (skill.write(skill_host_dir(host)?)?, Some(host.to_string()))
             } else if let Some(out) = a.out.as_ref() {
                 (skill.write(out)?, None)
+            } else if a.generic {
+                // 通用技能包没有项目可写，给个明确去处，别让人猜
+                return Err(CercisError::Invalid(
+                    "通用技能包要指定去处：--install codex（装进 AI 宿主）或 --out <目录>".into(),
+                ));
             } else {
-                (skill.write_into_project(&a.path)?, None)
+                let path = a.path.as_ref().expect("非 --generic 时项目目录必给出");
+                (skill.write_into_project(path)?, None)
             };
 
             let files = vec![
@@ -1553,7 +1583,10 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
                     contract.commands.len()
                 );
                 if host.is_none() {
-                    println!("安装：cercis skill <项目> --install codex（或 claude）");
+                    println!(
+                        "安装：cercis skill <项目> --install codex（或 claude）；\
+                         还没建项目就先装通用的：cercis skill --generic --install codex"
+                    );
                 }
             }
         }
@@ -1595,7 +1628,10 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
             if mutating {
                 cercis_core::accounts::require_plugin_edit(&a.path)?;
             }
-            let found = cercis_core::plugin::discover(&a.path, a.global_dir.as_deref())?;
+            // 没显式给 --global-dir 就用**用户级插件目录**（市场装的插件都在那里）。
+            // 否则用户从市场装完插件，`cercis plugins` 却报"未发现插件"，只能靠猜参数。
+            let global = effective_global_dir(a.global_dir.as_deref());
+            let found = cercis_core::plugin::discover(&a.path, global.as_deref())?;
             let trust = cercis_core::TrustRecord::load(&a.path)?;
             let state = cercis_core::plugin::PluginState::load(&a.path)?;
 
@@ -2214,7 +2250,8 @@ fn run(cli: &Cli) -> Result<(), CercisError> {
 
         Command::Trust(a) => {
             cercis_core::accounts::require_plugin_edit(&a.path)?;
-            let found = cercis_core::plugin::discover(&a.path, None)?;
+            let global = effective_global_dir(None);
+            let found = cercis_core::plugin::discover(&a.path, global.as_deref())?;
             let target = found
                 .iter()
                 .find(|p| p.manifest.id == a.id)
@@ -5036,6 +5073,17 @@ fn market_cmd(a: &MarketArgs, json_out: bool) -> Result<(), CercisError> {
 /// 用户级插件目录（市场安装的插件放这里）：`CERCIS_GLOBAL_PLUGINS` > `~/.cercis/plugins`。
 fn global_dir_plugins() -> Result<PathBuf, CercisError> {
     default_global_plugin_dir()
+}
+
+/// 发现插件时用哪个用户级目录：显式给的优先，否则用默认的（环境和 HOME）。
+///
+/// 关键点：**默认要给**。用户从市场装的插件都落在用户级目录里，
+/// 如果默认什么都不给，`cercis plugins` 就会"看不见自己刚装的插件"。
+fn effective_global_dir(explicit: Option<&Path>) -> Option<PathBuf> {
+    match explicit {
+        Some(p) => Some(p.to_path_buf()),
+        None => global_dir_plugins().ok(),
+    }
 }
 
 /// 用户级插件目录（市场安装的插件放这里）：`--global-dir` > `CERCIS_GLOBAL_PLUGINS` > `~/.cercis/plugins`。
